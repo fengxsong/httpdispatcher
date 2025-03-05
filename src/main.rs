@@ -1,0 +1,72 @@
+mod component;
+mod config;
+mod runtime;
+mod sinks;
+mod sources;
+mod transforms;
+
+use anyhow::{Error, Result};
+use clap::Parser;
+use config::Config;
+use runtime::Runtime;
+use tracing::info;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "config.toml")]
+    config: String,
+
+    #[arg(short, long, default_value = "info")]
+    log_level: String,
+
+    #[arg(long, default_value = "text", value_parser = ["text", "json", "json-pretty"])]
+    log_format: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let args = Args::parse();
+
+    // Initialize logging
+    let fmt_layer = match args.log_format.as_str() {
+        "json" => Box::new(fmt::layer().json()),
+        _ => fmt::layer().boxed(),
+    };
+
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&args.log_level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .init();
+
+    // Load configuration
+    let config = Config::load(&args.config)?;
+
+    // Log component counts
+    info!(
+        "Configuration loaded successfully, Loaded {} sources, {} transforms, {} sinks",
+        config.sources.len(),
+        config.transforms.len(),
+        config.sinks.len()
+    );
+
+    // Build and start runtime
+    info!("Building runtime...");
+    let mut runtime = Runtime::build(&config).await?;
+
+    info!("Starting pipeline execution...");
+    runtime.run().await?;
+
+    // Keep the application running
+    tokio::signal::ctrl_c().await?;
+
+    info!("Shutting down...");
+    runtime.shutdown().await?;
+
+    Ok(())
+}

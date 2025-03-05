@@ -1,0 +1,45 @@
+sources:
+  http_input:
+    type: http
+    address: 0.0.0.0
+    port: 9090
+    path: /ingest
+    max_body_size_bytes: 1048576
+
+transforms:
+  log_processor:
+    type: remap
+    inputs: ["http_input"]
+    source: |
+      .metadata = {
+        "processed_at": now(),
+        "event_source": "alertmanager",
+        "event_type": .value,
+        "priority": "high",
+        "memtions": ["@mason"],
+        "api_key": "1234567890",
+      }
+      .
+
+sinks:
+  api_output:
+    type: http
+    inputs: ["log_processor"]
+    uri: "http://localhost:9090/echo"
+    method: POST
+    encoding: json
+    template: |
+      {
+        "event_id": "{{ id }}",
+      }
+    headers:
+      # Authorization: "Bearer {{ data.metadata.api_key }}"
+      Content-Type: "application/json"
+    timeout_ms: 5000
+    retry_attempts: 3
+    retry_interval_ms: 1000
+
+  debug_output:
+    type: console
+    inputs: ["log_processor"]
+    encoding: json
