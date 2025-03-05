@@ -7,7 +7,7 @@ sources:
     max_body_size_bytes: 1048576
 
 transforms:
-  log_processor:
+  testvrl:
     type: remap
     inputs: ["http_input"]
     source: |
@@ -24,7 +24,7 @@ transforms:
 sinks:
   api_output:
     type: http
-    inputs: ["log_processor"]
+    inputs: ["testvrl"]
     uri: "http://localhost:9090/echo"
     method: POST
     encoding: json
@@ -41,5 +41,5 @@ sinks:
 
   debug_output:
     type: console
-    inputs: ["log_processor"]
+    inputs: ["testvrl"]
     encoding: json

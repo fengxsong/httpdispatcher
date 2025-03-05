@@ -21,7 +21,7 @@ struct Args {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
-    #[arg(long, default_value = "text", value_parser = ["text", "json", "json-pretty"])]
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     log_format: String,
 }
 

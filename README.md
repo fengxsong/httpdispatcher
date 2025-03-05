@@ -56,13 +56,13 @@ sources:
     address: 0.0.0.0
     port: 9090
     path: /ingest
-    max_body_size_bytes: 1048576  # 1MB
+    max_body_size_bytes: 1048576
 ```
 
 ### Transform Configuration
 ```yaml
 transforms:
-  log_processor:
+  vrltest:
     type: remap
     inputs: ["http_input"]
     source: |
@@ -80,7 +80,7 @@ transforms:
 sinks:
   api_output:
     type: http
-    inputs: ["log_processor"]
+    inputs: ["vrltest"]
     uri: "https://api.example.com/{{ endpoint }}"
     method: POST
     encoding: json
@@ -127,7 +127,7 @@ Main dependencies include:
 - tracing: Logging
 - tower: Middleware framework
 - tower-http: HTTP-specific middleware
-- handlebars: Template engine
+- tera: Template engine
 
 ### Building and Testing
 

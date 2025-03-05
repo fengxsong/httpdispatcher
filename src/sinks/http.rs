@@ -3,24 +3,22 @@ use crate::config::SinkConfig;
 use crate::sinks::render::load_template;
 use anyhow::{anyhow, Error, Result};
 use async_trait::async_trait;
-use handlebars::Handlebars;
 use reqwest::{Client, Method, RequestBuilder};
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap;
 use std::time::Duration;
+use tera::{Context, Tera};
 
 pub struct HttpSink {
     name: String,
-    type_: String,
     inputs: Vec<String>,
     client: Client,
     uri: String,
-    method: String,
+    method: Option<String>,
     headers: Option<HashMap<String, String>>,
     query_params: Option<HashMap<String, String>>,
-    template: Option<String>,
-    handlebars: Handlebars<'static>,
+    template: Tera,
 }
 
 impl HttpSink {
@@ -30,46 +28,51 @@ impl HttpSink {
             .build()
             .unwrap();
 
-        let mut hbs = Handlebars::new();
-        if let Some(template) = &config.template {
-            let template_content = load_template(template)?;
-            hbs.register_template_string(&name, template_content)?;
+        let mut template = Tera::default();
+        if let Some(tpl) = &config.template {
+            let template_content = load_template(tpl)?;
+            template.add_raw_template(&name, template_content.as_str())?;
         }
 
         Ok(Self {
             name,
-            type_: "http".to_string(),
             inputs: config.inputs,
             client,
             uri: config.uri.unwrap(),
-            method: config.method.unwrap_or_else(|| "POST".to_string()),
+            method: config.method,
             headers: config.headers,
             query_params: config.query_params,
-            template: config.template,
-            handlebars: hbs,
+            template: template,
         })
     }
 
     fn build_request(&self, event: &Event) -> Result<RequestBuilder, Error> {
-        let template_data = json!({
+        let template_data = Context::from_serialize(json!({
             "id": event.id,
             "data": event.data,
             "metadata": event.metadata
-        });
+        }))?;
 
         let uri = self
-            .handlebars
-            .render_template(self.uri.as_str(), &template_data)?;
+            .template
+            .clone()
+            .render_str(self.uri.as_str(), &template_data)?;
 
-        let method = match self.method.to_uppercase().as_str() {
-            "GET" => Method::GET,
-            "POST" => Method::POST,
-            "PUT" => Method::PUT,
-            "DELETE" => Method::DELETE,
-            "PATCH" => Method::PATCH,
-            "HEAD" => Method::HEAD,
-            "OPTIONS" => Method::OPTIONS,
-            _ => Method::POST,
+        let method = {
+            if let Some(method) = self.method.clone() {
+                match method.to_uppercase().as_str() {
+                    "GET" => Method::GET,
+                    "POST" => Method::POST,
+                    "PUT" => Method::PUT,
+                    "DELETE" => Method::DELETE,
+                    "PATCH" => Method::PATCH,
+                    "HEAD" => Method::HEAD,
+                    "OPTIONS" => Method::OPTIONS,
+                    _ => Method::POST,
+                }
+            } else {
+                Method::POST
+            }
         };
 
         let mut request = self.client.request(method, &uri);
@@ -78,8 +81,9 @@ impl HttpSink {
             let mut rendered_params = HashMap::new();
             for (key, template) in query_params {
                 let value = self
-                    .handlebars
-                    .render_template(template, &template_data)
+                    .template
+                    .clone()
+                    .render_str(template, &template_data)
                     .map_err(|e| anyhow!("Rendering query_params: {}", e))?;
                 rendered_params.insert(key.clone(), value);
             }
@@ -89,22 +93,15 @@ impl HttpSink {
         if let Some(headers) = &self.headers {
             for (key, template) in headers {
                 let value = self
-                    .handlebars
-                    .render_template(template, &template_data)
+                    .template
+                    .clone()
+                    .render_str(template, &template_data)
                     .map_err(|e| anyhow!("Rendering headers: {}", e))?;
                 request = request.header(key, value);
             }
         }
-
-        if let Some(_) = &self.template {
-            let body = self
-                .handlebars
-                .render(&self.name, &template_data)
-                .map_err(|e| anyhow!("Rendering template: {}", e))?;
-            request = request.body(body);
-        } else {
-            request = request.json(&event.data);
-        }
+        let body = self.template.render(&self.name, &template_data)?;
+        request = request.body(body);
 
         Ok(request)
     }
@@ -116,7 +113,7 @@ impl Component for HttpSink {
     }
 
     fn type_(&self) -> &str {
-        &self.type_
+        "http"
     }
 
     fn inputs(&self) -> &[String] {
