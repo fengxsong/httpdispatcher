@@ -12,8 +12,16 @@ use runtime::Runtime;
 use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+fn print_version() {
+    println!("HTTP Dispatcher {}", env!("CARGO_PKG_VERSION"));
+    println!("Build Time:    {}", env!("BUILD_TIME"));
+    println!("Git Commit:    {}", env!("GIT_COMMIT_HASH"));
+    println!("Rust Version:  {}", env!("RUSTC_VERSION"));
+    println!("Build Profile: {}", env!("BUILD_PROFILE"));
+}
+
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, disable_version_flag=true)]
 struct Args {
     #[arg(short, long, default_value = "config.toml")]
     config: String,
@@ -23,11 +31,19 @@ struct Args {
 
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     log_format: String,
+
+    #[arg(long, short = 'v', help = "Print version information")]
+    version: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = Args::parse();
+
+    if args.version {
+        print_version();
+        return Ok(());
+    }
 
     // Initialize logging
     let fmt_layer = match args.log_format.as_str() {

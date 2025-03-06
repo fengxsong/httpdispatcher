@@ -1,39 +1,25 @@
 sources:
-  http_input:
+  alertmanager:
     type: http
     address: 0.0.0.0
     port: 9090
-    path: /ingest
+    path: /alerts
     max_body_size_bytes: 1048576
 
 transforms:
   testvrl:
     type: remap
-    inputs: ["http_input"]
+    inputs: ["alertmanager"]
     source: |
-      .metadata = {
-        "processed_at": now(),
-        "event_source": "alertmanager",
-        "event_type": .value,
-        "priority": "high",
-        "memtions": ["@mason"],
-        "api_key": "1234567890",
-      }
       .
 
 sinks:
   api_output:
     type: http
     inputs: ["testvrl"]
-    uri: "http://localhost:9090/echo"
-    method: POST
-    encoding: json
-    template: |
-      {
-        "event_id": "{{ id }}",
-      }
+    uri: "https://open.feishu.cn/open-apis/bot/v2/hook/fddc37b3-2882-4d8f-90f2-279d307505e5"
+    template: file://./feishu.j2
     headers:
-      # Authorization: "Bearer {{ data.metadata.api_key }}"
       Content-Type: "application/json"
     timeout_ms: 5000
     retry_attempts: 3
@@ -42,4 +28,5 @@ sinks:
   debug_output:
     type: console
     inputs: ["testvrl"]
-    encoding: json
+    encoding: text
+    template: file://./feishu.j2

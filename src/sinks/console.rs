@@ -1,9 +1,9 @@
 use crate::component::{Component, Event, Sink};
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use async_trait::async_trait;
-use serde_json::{json, to_string_pretty};
+use serde_json::to_string_pretty;
 use std::any::Any;
-use tera::{Context, Tera};
+use tera::Tera;
 use tracing::info;
 
 use super::render::load_template;
@@ -30,7 +30,8 @@ impl ConsoleSink {
         {
             let content = load_template(tpl)?;
             let mut tera = Tera::default();
-            tera.add_raw_template(&name, &content)?;
+            tera.add_raw_template(&name, &content)
+                .context(anyhow!("Failed to add template"))?;
             template = Some(tera);
         }
 
@@ -62,13 +63,10 @@ impl Sink for ConsoleSink {
         match &self.format {
             OutputFormat::Text { template: _ } => {
                 if let Some(template) = &self.template {
-                    let context = Context::from_serialize(json!({
-                        "id": event.id,
-                        "data": event.data,
-                        "metadata": event.metadata,
-                        "timestamp": chrono::Local::now().to_rfc3339()
-                    }))?;
-                    let output = template.render(&self.name, &context)?;
+                    let context = tera::Context::from_serialize(&event.data)?;
+                    let output = template
+                        .render(&self.name, &context)
+                        .map_err(|e| anyhow!("{:?}", e))?;
                     info!("{}", output);
                 } else {
                     info!(
@@ -78,7 +76,7 @@ impl Sink for ConsoleSink {
                 }
             }
             OutputFormat::Json => {
-                let json_output = to_string_pretty(&event)?;
+                let json_output = to_string_pretty(&event.data)?;
                 info!("Consuming event:\n{}", json_output);
             }
         }

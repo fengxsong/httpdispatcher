@@ -1,0 +1,35 @@
+{
+  "msg_type": "interactive",
+  "card": {
+    "header": {
+      "title": {
+        "tag": "plain_text",
+        "content": "{{ alerts | length }} Alert: {% if groupLabels.alertname %}{{ groupLabels.alertname }}{% else %} Unknown {% endif %} {{ status }}"
+      },
+      "template": "{% if status == 'firing' %}red{% else %}green{% endif %}"
+    },
+    "elements": [
+      {% for alert in alerts %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**Status**: {{ alert.status }}\n**Instance**: {{ alert.labels.instance }}\n**Job**: {{ alert.labels.job }}\n{% if alert.annotations.summary %}**Summary**: {{ alert.annotations.summary }}{%endif%}\n{% if alert.annotations.description %}**Description**: {{ alert.annotations.description }}{%endif%}"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {% endfor %}
+      {
+        "tag": "note",
+        "elements": [
+          {
+            "tag": "lark_md",
+            "content": "[View in Prometheus]({{ alerts[0].generatorURL }})"
+          }
+        ]
+      }
+    ]
+  }
+}

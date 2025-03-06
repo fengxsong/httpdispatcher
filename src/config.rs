@@ -19,6 +19,7 @@ pub struct SourceConfig {
     pub port: Option<u16>,
     pub path: String,
     pub max_body_size_bytes: Option<usize>,
+    pub enable_echo: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -44,6 +45,22 @@ pub struct SinkConfig {
     pub timeout_ms: Option<u64>,
     pub retry_attempts: Option<u32>,
     pub retry_interval_ms: Option<u64>,
+    pub basic_auth: Option<String>,
+    pub authorization: Option<String>,
+    pub proxy_url: Option<String>,
+    pub proxy_from_environment: bool,
+    pub proxy_connect_headers: Option<HashMap<String, String>>,
+    pub follow_redirects: bool,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TlsConfig {
+    pub ca_file: Option<String>,
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
+    pub verify: bool,
 }
 
 impl Config {

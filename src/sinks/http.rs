@@ -1,14 +1,14 @@
 use crate::component::{Component, Event, Sink};
 use crate::config::SinkConfig;
 use crate::sinks::render::load_template;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use async_trait::async_trait;
-use reqwest::{Client, Method, RequestBuilder};
-use serde_json::json;
-use std::any::Any;
+use reqwest::{Certificate, Client, Method, RequestBuilder};
 use std::collections::HashMap;
 use std::time::Duration;
-use tera::{Context, Tera};
+use std::{any::Any, fs};
+use tera::Tera;
+use tracing::error;
 
 pub struct HttpSink {
     name: String,
@@ -23,16 +23,45 @@ pub struct HttpSink {
 
 impl HttpSink {
     pub fn new(name: String, config: SinkConfig) -> Result<Self, Error> {
-        let client = Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms.unwrap_or(30000)))
-            .build()
-            .unwrap();
+        let mut client_builder = Client::builder()
+            .redirect(match config.follow_redirects {
+                true => reqwest::redirect::Policy::default(),
+                false => reqwest::redirect::Policy::none(),
+            })
+            .timeout(Duration::from_millis(config.timeout_ms.unwrap_or(30000)));
+
+        if let Some(proxy) = &config.proxy_url {
+            client_builder = client_builder.proxy(reqwest::Proxy::all(proxy)?);
+        } else if config.proxy_from_environment {
+            // TODO: implement
+        }
+
+        if let Some(tls) = config.tls {
+            if let Some(ca_file) = &tls.ca_file {
+                let certs = fs::read(ca_file)?;
+                client_builder =
+                    client_builder.add_root_certificate(Certificate::from_pem(&certs)?);
+            }
+            if tls.client_cert.is_some() && tls.client_key.is_some() {
+                let client_cert = fs::read(tls.client_cert.as_deref().unwrap_or_default())?;
+                let client_key = fs::read(tls.client_key.as_deref().unwrap_or_default())?;
+                let tls_config = reqwest::Identity::from_pkcs8_pem(&client_cert, &client_key)?;
+
+                client_builder = client_builder
+                    .tls_built_in_root_certs(!tls.verify)
+                    .identity(tls_config);
+            }
+        }
 
         let mut template = Tera::default();
         if let Some(tpl) = &config.template {
             let template_content = load_template(tpl)?;
             template.add_raw_template(&name, template_content.as_str())?;
         }
+
+        let client = client_builder
+            .build()
+            .context(anyhow!("Creating HTTP client"))?;
 
         Ok(Self {
             name,
@@ -42,21 +71,18 @@ impl HttpSink {
             method: config.method,
             headers: config.headers,
             query_params: config.query_params,
-            template: template,
+            template,
         })
     }
 
     fn build_request(&self, event: &Event) -> Result<RequestBuilder, Error> {
-        let template_data = Context::from_serialize(json!({
-            "id": event.id,
-            "data": event.data,
-            "metadata": event.metadata
-        }))?;
+        let ctx = tera::Context::from_serialize(&event.data)?;
 
         let uri = self
             .template
             .clone()
-            .render_str(self.uri.as_str(), &template_data)?;
+            .render_str(self.uri.as_str(), &ctx)
+            .map_err(|e| anyhow!("Rendering uri: {:?}", e))?;
 
         let method = {
             if let Some(method) = self.method.clone() {
@@ -83,8 +109,8 @@ impl HttpSink {
                 let value = self
                     .template
                     .clone()
-                    .render_str(template, &template_data)
-                    .map_err(|e| anyhow!("Rendering query_params: {}", e))?;
+                    .render_str(template, &ctx)
+                    .map_err(|e| anyhow!("Rendering query_params: {:?}", e))?;
                 rendered_params.insert(key.clone(), value);
             }
             request = request.query(&rendered_params);
@@ -95,12 +121,15 @@ impl HttpSink {
                 let value = self
                     .template
                     .clone()
-                    .render_str(template, &template_data)
-                    .map_err(|e| anyhow!("Rendering headers: {}", e))?;
+                    .render_str(template, &ctx)
+                    .map_err(|e| anyhow!("Rendering headers: {:?}", e))?;
                 request = request.header(key, value);
             }
         }
-        let body = self.template.render(&self.name, &template_data)?;
+        let body = self
+            .template
+            .render(&self.name, &ctx)
+            .map_err(|e| anyhow!("Rendering body: {:?}", e))?;
         request = request.body(body);
 
         Ok(request)
@@ -128,10 +157,13 @@ impl Sink for HttpSink {
         let response = request.send().await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "HTTP sink request failed with status: {}",
-                response.status()
-            ));
+            let status = response.status();
+            let body = response.text().await?;
+            error!(
+                "HTTP sink request failed with status: {}, response: {}",
+                status, body
+            );
+            return Err(anyhow!("HTTP sink request failed with status: {}", status));
         }
 
         Ok(())

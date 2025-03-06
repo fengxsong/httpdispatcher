@@ -25,7 +25,6 @@ use tracing::{debug, error, info, warn};
 
 pub struct HttpSource {
     name: String,
-    type_: String,
     config: SourceConfig,
     tx: Option<broadcast::Sender<Event>>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
@@ -35,7 +34,6 @@ impl Clone for HttpSource {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            type_: self.type_.clone(),
             config: self.config.clone(),
             tx: self.tx.clone(),
             server_handle: None,
@@ -47,7 +45,6 @@ impl HttpSource {
     pub fn new(name: String, config: SourceConfig) -> Result<Self, Error> {
         Ok(Self {
             name,
-            type_: "http".into(),
             config,
             tx: None,
             server_handle: None,
@@ -55,7 +52,6 @@ impl HttpSource {
     }
 
     async fn handle_echo(req: Request<axum::body::Body>) -> impl IntoResponse {
-        // 从Request中解构出各个部分
         let (parts, body) = req.into_parts();
         let headers = parts.headers;
         let uri = parts.uri;
@@ -132,7 +128,7 @@ impl Component for HttpSource {
     }
 
     fn type_(&self) -> &str {
-        &self.type_
+        "http"
     }
 
     fn inputs(&self) -> &[String] {
@@ -155,12 +151,11 @@ impl Source for HttpSource {
         let tx = Arc::new(tx);
         let tx_clone = tx.clone();
 
-        let app = Router::new()
+        let mut app = Router::new()
             .route(
                 &self.config.path,
                 post(move |payload| HttpSource::handle_request(payload, tx_clone)),
             )
-            .route("/echo", get(Self::handle_echo).post(Self::handle_echo))
             .layer(
                 TraceLayer::new_for_http()
                     .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
@@ -190,6 +185,10 @@ impl Source for HttpSource {
                         self.config.max_body_size_bytes.unwrap_or(1024 * 1024),
                     )),
             );
+
+        if self.config.enable_echo.unwrap_or(false) {
+            app = app.route("/echo", get(Self::handle_echo).post(Self::handle_echo))
+        }
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 

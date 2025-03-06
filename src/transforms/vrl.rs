@@ -1,6 +1,6 @@
 use crate::component::{Component, Event, Transform};
 use crate::config::TransformConfig;
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Error, Result};
 use async_trait::async_trait;
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -17,7 +17,6 @@ use vrl::{
 
 pub struct VrlTransform {
     name: String,
-    type_: String,
     inputs: Vec<String>,
     result: Arc<CompilationResult>,
 }
@@ -25,11 +24,11 @@ pub struct VrlTransform {
 impl VrlTransform {
     pub fn new(name: String, config: &TransformConfig) -> Result<Self, Error> {
         let fns = vrl::stdlib::all();
-        let result = vrl::compiler::compile(&config.source, &fns).unwrap();
+        let result = vrl::compiler::compile(&config.source, &fns)
+            .map_err(|e| anyhow!("Failed to compile VRL transform: {:?}", e))?;
 
         Ok(Self {
             name: name,
-            type_: "remap".to_string(),
             inputs: config.inputs.clone(),
             result: Arc::new(result),
         })
@@ -102,7 +101,7 @@ impl Component for VrlTransform {
     }
 
     fn type_(&self) -> &str {
-        &self.type_
+        "remap"
     }
 
     fn inputs(&self) -> &[String] {
@@ -113,7 +112,6 @@ impl Component for VrlTransform {
 #[async_trait]
 impl Transform for VrlTransform {
     async fn transform(&self, event: &Event) -> Result<Event, Error> {
-        debug!("VRL transform event: {:?}", event);
         let mut target = TargetValue {
             value: VrlTransform::convert_to_vrl_value(&event.data),
             metadata: value!(event.clone().metadata),

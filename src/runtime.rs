@@ -1,6 +1,6 @@
 use crate::component::{Event, Sink, Source, Transform};
 use crate::config::Config;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
@@ -73,17 +73,22 @@ impl Runtime {
     }
 
     async fn connect_pipelines(runtime: &mut Runtime, config: &Config) -> Result<(), Error> {
-        // 连接 transforms 的输入
         for (name, t_config) in &config.transforms {
             {
                 let transform = runtime.get_transform(name)?;
 
                 {
-                    let transform_channel = runtime.channels.get_mut(name).unwrap();
+                    let transform_channel = runtime
+                        .channels
+                        .get_mut(name)
+                        .context(anyhow!("Transform channel not found for {}", name))?;
                     let tx = transform_channel.tx.clone();
 
                     for input in &t_config.inputs.clone() {
-                        let input_channel = runtime.channels.get(input).unwrap();
+                        let input_channel = runtime
+                            .channels
+                            .get(input)
+                            .context(anyhow!("Input channel not found for {}", input))?;
                         let mut rx = input_channel.rx.resubscribe();
                         let tx_clone = tx.clone();
                         let transform_clone = transform.clone();
@@ -103,7 +108,7 @@ impl Runtime {
                                     Err(e) => error!(
                                         "Transform {} failed to process event: {:?}, err: {}",
                                         transform_clone.lock().await.name(),
-                                        event,
+                                        event.id,
                                         e
                                     ),
                                 }
@@ -114,12 +119,14 @@ impl Runtime {
             }
         }
 
-        // 连接 sinks 的输入
         for (name, s_config) in &config.sinks {
             let sink = runtime.get_sink(name)?;
 
             for input in &s_config.inputs {
-                let input_channel = runtime.channels.get(input).unwrap();
+                let input_channel = runtime
+                    .channels
+                    .get(input)
+                    .context(anyhow!("Input channel not found for {}", input))?;
                 let mut rx = input_channel.rx.resubscribe();
                 let sink_clone = sink.clone();
                 info!(
@@ -135,7 +142,7 @@ impl Runtime {
                             Err(e) => error!(
                                 "Sink {} failed to process event: {:?}, err: {}",
                                 sink_clone.lock().await.name(),
-                                &event,
+                                &event.id,
                                 e
                             ),
                         }
