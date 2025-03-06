@@ -54,23 +54,24 @@ sources:
   http_input:
     type: http
     address: 0.0.0.0
-    port: 9090
+    port: 3000
     path: /ingest
-    max_body_size_bytes: 1048576
+    max_body_size_bytes: 10485760  # 10MB
+    basic_auth: "dXNlcjpwYXNzd29yZA==" # not yet supported
 ```
 
 ### Transform Configuration
 ```yaml
 transforms:
-  vrltest:
+  alert_processor:
     type: remap
     inputs: ["http_input"]
     source: |
       .metadata = {
         "processed_at": now(),
-        "event_source": "alertmanager",
-        "event_type": .value,
-        "priority": "high"
+        "source_type": "alertmanager",
+        "alert_name": .alerts[0].labels.alertname,
+        "severity": .alerts[0].labels.severity || "unknown"
       }
       .
 ```
@@ -78,24 +79,29 @@ transforms:
 ### Output Configuration
 ```yaml
 sinks:
-  api_output:
+  webhook_output:
     type: http
-    inputs: ["vrltest"]
-    uri: "https://api.example.com/{{ endpoint }}"
+    inputs: ["alert_processor"]
+    uri: "https://api.example.com/webhooks/alerts"
     method: POST
-    encoding: json
     template: |
       {
-        "event_id": "{{ id }}",
-        "payload": {{ to_json(data) }},
-        "timestamp": "{{ metadata.timestamp }}"
+        "id": "{{ id }}",
+        "alert": {{ to_json(alerts[0]) }},
+        "timestamp": "{{ metadata.processed_at }}",
+        "source": "{{ metadata.source_type }}",
+        "severity": "{{ metadata.severity }}"
       }
     headers:
-      Authorization: "Bearer {{ metadata.api_key }}"
+      Authorization: "Bearer {{ env.API_TOKEN }}"
       Content-Type: "application/json"
+      X-Source: "httpdispatcher"
     timeout_ms: 5000
     retry_attempts: 3
-    retry_interval_ms: 1000
+    follow_redirects: true
+    tls:
+      verify: true
+      ca_file: "/path/to/ca.pem"  # Optional
 ```
 
 ## Usage Examples
