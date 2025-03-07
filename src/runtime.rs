@@ -23,7 +23,7 @@ enum ComponentRef {
 impl Runtime {
     pub async fn build(config: &Config, config_path: String) -> Result<Self> {
         let config_manager = Arc::new(ConfigManager::new(config_path, config.clone()));
-        
+
         let runtime = Runtime {
             config_manager: config_manager.clone(),
             components: DashMap::new(),
@@ -61,7 +61,9 @@ impl Runtime {
         // Create sources
         for (name, source_config) in &config.sources {
             let source = crate::sources::create_source(name.to_string(), source_config.clone())
-                .map_err(|e| RuntimeError::init_error(format!("Failed to create source {}: {}", name, e)))?;
+                .map_err(|e| {
+                    RuntimeError::init_error(format!("Failed to create source {}: {}", name, e))
+                })?;
             self.components.insert(
                 name.to_string(),
                 ComponentRef::Source(Arc::new(Mutex::new(source))),
@@ -70,8 +72,14 @@ impl Runtime {
 
         // Create transforms
         for (name, transform_config) in &config.transforms {
-            let transform = crate::transforms::create_transform(name.to_string(), transform_config.clone())
-                .map_err(|e| RuntimeError::init_error(format!("Failed to create transform {}: {}", name, e)))?;
+            let transform =
+                crate::transforms::create_transform(name.to_string(), transform_config.clone())
+                    .map_err(|e| {
+                        RuntimeError::init_error(format!(
+                            "Failed to create transform {}: {}",
+                            name, e
+                        ))
+                    })?;
             self.components.insert(
                 name.to_string(),
                 ComponentRef::Transform(Arc::new(Mutex::new(transform))),
@@ -80,8 +88,10 @@ impl Runtime {
 
         // Create sinks
         for (name, sink_config) in &config.sinks {
-            let sink = crate::sinks::create_sink(name.to_string(), sink_config.clone())
-                .map_err(|e| RuntimeError::init_error(format!("Failed to create sink {}: {}", name, e)))?;
+            let sink =
+                crate::sinks::create_sink(name.to_string(), sink_config.clone()).map_err(|e| {
+                    RuntimeError::init_error(format!("Failed to create sink {}: {}", name, e))
+                })?;
             self.components.insert(
                 name.to_string(),
                 ComponentRef::Sink(Arc::new(Mutex::new(sink))),
@@ -95,18 +105,18 @@ impl Runtime {
 
     pub async fn reload(&self) -> Result<()> {
         info!("Reloading runtime configuration");
-        
+
         // Reload configuration
         self.config_manager.reload().await?;
-        
+
         // Clear existing components
         self.components.clear();
         self.tx.clear();
         self.rx.clear();
-        
+
         // Initialize with new configuration
         self.initialize_components().await?;
-        
+
         info!("Runtime configuration reloaded successfully");
         Ok(())
     }
@@ -118,7 +128,7 @@ impl Runtime {
         for pair in runtime.components.iter() {
             let name = pair.key().clone();
             let component = pair.value();
-            
+
             match component {
                 ComponentRef::Transform(transform) => {
                     let transform = transform.clone();
@@ -137,14 +147,30 @@ impl Runtime {
                             ));
                         }
 
-                        let tx = runtime.tx.get(&name).ok_or_else(|| {
-                            RuntimeError::channel_error(format!("Channel not found for {}", name))
-                        })?.value().clone();
-                        
-                        let mut input_rx = runtime.rx.get(&input).ok_or_else(|| {
-                            RuntimeError::channel_error(format!("Channel not found for input {}", input))
-                        })?.value().resubscribe();
-                        
+                        let tx = runtime
+                            .tx
+                            .get(&name)
+                            .ok_or_else(|| {
+                                RuntimeError::channel_error(format!(
+                                    "Channel not found for {}",
+                                    name
+                                ))
+                            })?
+                            .value()
+                            .clone();
+
+                        let mut input_rx = runtime
+                            .rx
+                            .get(&input)
+                            .ok_or_else(|| {
+                                RuntimeError::channel_error(format!(
+                                    "Channel not found for input {}",
+                                    input
+                                ))
+                            })?
+                            .value()
+                            .resubscribe();
+
                         let transform = transform.clone();
 
                         // Log connection
@@ -197,10 +223,18 @@ impl Runtime {
                             ));
                         }
 
-                        let mut input_rx = runtime.rx.get(&input).ok_or_else(|| {
-                            RuntimeError::channel_error(format!("Channel not found for input {}", input))
-                        })?.value().resubscribe();
-                        
+                        let mut input_rx = runtime
+                            .rx
+                            .get(&input)
+                            .ok_or_else(|| {
+                                RuntimeError::channel_error(format!(
+                                    "Channel not found for input {}",
+                                    input
+                                ))
+                            })?
+                            .value()
+                            .resubscribe();
+
                         let sink = sink.clone();
 
                         // Log connection
@@ -241,9 +275,14 @@ impl Runtime {
     pub async fn run(&self) -> Result<()> {
         for (name, _) in &self.config_manager.get_config().await.read().await.sources {
             let source = self.get_source(name)?;
-            let channel = self.tx.get(name).ok_or_else(|| {
-                RuntimeError::channel_error(format!("Channel not found for source {}", name))
-            })?.value().clone();
+            let channel = self
+                .tx
+                .get(name)
+                .ok_or_else(|| {
+                    RuntimeError::channel_error(format!("Channel not found for source {}", name))
+                })?
+                .value()
+                .clone();
 
             tokio::spawn(async move {
                 let mut source = source.lock().await;
@@ -254,7 +293,15 @@ impl Runtime {
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        for name in self.config_manager.get_config().await.read().await.sources.keys() {
+        for name in self
+            .config_manager
+            .get_config()
+            .await
+            .read()
+            .await
+            .sources
+            .keys()
+        {
             let source = self.get_source(name)?;
             let mut source = source.lock().await;
             if let Err(e) = source.shutdown().await {

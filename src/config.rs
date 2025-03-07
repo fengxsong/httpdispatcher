@@ -315,12 +315,12 @@ impl Config {
             #[allow(irrefutable_let_patterns)]
             if let SourceConfig::Http(http) = source {
                 let prefix = format!("DISPATCHER_SOURCE_{}_", name.to_uppercase());
-                
+
                 if let Ok(address) = env::var(format!("{}ADDRESS", prefix)) {
                     http.address = address;
                     info!("Overriding source {} address from environment", name);
                 }
-                
+
                 if let Ok(port) = env::var(format!("{}PORT", prefix)) {
                     if let Ok(port) = port.parse() {
                         http.port = Some(port);
@@ -334,12 +334,12 @@ impl Config {
         for (name, sink) in &mut self.sinks {
             if let SinkConfig::Http(http) = sink {
                 let prefix = format!("DISPATCHER_SINK_{}_", name.to_uppercase());
-                
+
                 if let Ok(uri) = env::var(format!("{}URI", prefix)) {
                     http.uri = uri;
                     info!("Overriding sink {} URI from environment", name);
                 }
-                
+
                 if let Ok(timeout) = env::var(format!("{}TIMEOUT_MS", prefix)) {
                     if let Ok(timeout) = timeout.parse() {
                         http.timeout_ms = Some(timeout);
@@ -372,11 +372,11 @@ impl ConfigManager {
     pub async fn reload(&self) -> Result<()> {
         let new_config = Config::load(&self.path)?;
         new_config.validate()?;
-        
+
         let mut config = self.config.write().await;
         *config = new_config;
         info!("Configuration reloaded successfully");
-        
+
         Ok(())
     }
 

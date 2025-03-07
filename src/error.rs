@@ -1,6 +1,6 @@
+use std::fmt;
 use std::io;
 use thiserror::Error;
-use std::fmt;
 
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -94,9 +94,9 @@ impl RuntimeError {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            RuntimeError::ConfigError(_) |
-            RuntimeError::ComponentNotFound(_) |
-            RuntimeError::InvalidInput(_, _)
+            RuntimeError::ConfigError(_)
+                | RuntimeError::ComponentNotFound(_)
+                | RuntimeError::InvalidInput(_, _)
         )
     }
 
@@ -136,4 +136,4 @@ impl From<serde_yaml::Error> for RuntimeError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, RuntimeError>; 
+pub type Result<T> = std::result::Result<T, RuntimeError>;
