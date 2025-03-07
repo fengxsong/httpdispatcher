@@ -1,12 +1,17 @@
+use crate::error::RuntimeError;
 use anyhow::{anyhow, Result};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -185,27 +190,33 @@ fn default_channel_capacity() -> usize {
 }
 
 impl Config {
-    pub fn load(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
-        let mut config: Config = match Path::new(path)
+    pub async fn load(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
+        let path = path.as_ref();
+        let content = fs::read_to_string(path)
+            .map_err(|e| RuntimeError::ConfigError(format!("Failed to read config file: {}", e)))?;
+
+        let config: Config = match Path::new(path)
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_lowercase()
             .as_str()
         {
-            "toml" => toml::from_str(&content)?,
-            "yaml" | "yml" => serde_yaml::from_str(&content)?,
-            "json" => serde_json::from_str(&content)?,
-            _ => return Err(anyhow!("Unknown config file format: {}", path)),
+            "toml" => toml::from_str::<Config>(&content)
+                .map_err(|e| RuntimeError::ConfigError(format!("Failed to parse TOML: {}", e)))?,
+            "yaml" | "yml" => serde_yaml::from_str::<Config>(&content)
+                .map_err(|e| RuntimeError::ConfigError(format!("Failed to parse YAML: {}", e)))?,
+            "json" => serde_json::from_str::<Config>(&content)
+                .map_err(|e| RuntimeError::ConfigError(format!("Failed to parse JSON: {}", e)))?,
+            _ => {
+                return Err(RuntimeError::ConfigError(format!(
+                    "Unknown config file format: {}",
+                    path.display()
+                )))
+            }
         };
 
-        // Apply environment variable overrides
-        config.apply_env_overrides();
-
-        // Validate configuration
         config.validate()?;
-
         Ok(config)
     }
 
@@ -263,7 +274,12 @@ impl Config {
 
     /// Validate that all pipeline connections are valid
     fn validate_pipeline_connections(&self) -> Result<()> {
-        let mut available_outputs: Vec<String> = self.sources.keys().cloned().collect();
+        let available_outputs: Vec<String> = self
+            .sources
+            .keys()
+            .cloned()
+            .chain(self.transforms.keys().cloned())
+            .collect();
 
         // Validate transform inputs
         for (name, transform) in &self.transforms {
@@ -280,7 +296,6 @@ impl Config {
                     }
                 }
             }
-            available_outputs.push(name.clone());
         }
 
         // Validate sink inputs
@@ -299,100 +314,129 @@ impl Config {
 
         Ok(())
     }
-
-    /// Apply environment variable overrides to the configuration
-    fn apply_env_overrides(&mut self) {
-        // Override channel capacity
-        if let Ok(capacity) = env::var("DISPATCHER_CHANNEL_CAPACITY") {
-            if let Ok(capacity) = capacity.parse() {
-                self.channel_capacity = capacity;
-                info!("Overriding channel capacity from environment: {}", capacity);
-            }
-        }
-
-        // Override HTTP source configurations
-        for (name, source) in &mut self.sources {
-            #[allow(irrefutable_let_patterns)]
-            if let SourceConfig::Http(http) = source {
-                let prefix = format!("DISPATCHER_SOURCE_{}_", name.to_uppercase());
-
-                if let Ok(address) = env::var(format!("{}ADDRESS", prefix)) {
-                    http.address = address;
-                    info!("Overriding source {} address from environment", name);
-                }
-
-                if let Ok(port) = env::var(format!("{}PORT", prefix)) {
-                    if let Ok(port) = port.parse() {
-                        http.port = Some(port);
-                        info!("Overriding source {} port from environment", name);
-                    }
-                }
-            }
-        }
-
-        // Override HTTP sink configurations
-        for (name, sink) in &mut self.sinks {
-            if let SinkConfig::Http(http) = sink {
-                let prefix = format!("DISPATCHER_SINK_{}_", name.to_uppercase());
-
-                if let Ok(uri) = env::var(format!("{}URI", prefix)) {
-                    http.uri = uri;
-                    info!("Overriding sink {} URI from environment", name);
-                }
-
-                if let Ok(timeout) = env::var(format!("{}TIMEOUT_MS", prefix)) {
-                    if let Ok(timeout) = timeout.parse() {
-                        http.timeout_ms = Some(timeout);
-                        info!("Overriding sink {} timeout from environment", name);
-                    }
-                }
-            }
-        }
-    }
 }
 
 // Configuration manager for hot reloading
+#[derive(Debug)]
 pub struct ConfigManager {
     config: Arc<RwLock<Config>>,
-    path: String,
+    config_path: PathBuf,
+    reload_tx: Option<broadcast::Sender<()>>,
+    watcher: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
 }
 
 impl ConfigManager {
-    pub fn new(path: String, config: Config) -> Self {
-        Self {
+    pub async fn new(config_path: impl AsRef<Path>) -> Result<Arc<Self>, RuntimeError> {
+        let config_path = config_path
+            .as_ref()
+            .canonicalize()
+            .map_err(|e| RuntimeError::ConfigError(format!("Failed to get absolute path: {}", e)))?;
+        
+        let config = Config::load(&config_path).await?;
+        let (reload_tx, _) = broadcast::channel(1);
+        
+        Ok(Arc::new(Self {
             config: Arc::new(RwLock::new(config)),
-            path,
-        }
+            config_path,
+            reload_tx: Some(reload_tx),
+            watcher: None,
+        }))
     }
 
-    pub async fn get_config(&self) -> Arc<RwLock<Config>> {
+    pub fn get_config(&self) -> Arc<RwLock<Config>> {
         self.config.clone()
     }
 
-    pub async fn reload(&self) -> Result<()> {
-        let new_config = Config::load(&self.path)?;
-        new_config.validate()?;
+    pub fn subscribe_to_reload(&self) -> Option<broadcast::Receiver<()>> {
+        self.reload_tx.as_ref().map(|tx| tx.subscribe())
+    }
 
+    pub async fn reload(&self) -> Result<(), RuntimeError> {
+        let new_config = Config::load(&self.config_path).await?;
         let mut config = self.config.write().await;
         *config = new_config;
-        info!("Configuration reloaded successfully");
+
+        if let Some(tx) = &self.reload_tx {
+            let _ = tx.send(());
+        }
 
         Ok(())
     }
 
-    pub async fn start_auto_reload(self: Arc<Self>) {
-        let reload_interval = env::var("DISPATCHER_CONFIG_RELOAD_INTERVAL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30); // Default 30 seconds
+    pub async fn start_file_watcher(self: &Arc<Self>) -> Result<(), RuntimeError> {
+        let (tx, mut rx) = mpsc::channel(1);
+        let config_path = self.config_path.clone();
+        let manager = self.clone();
+
+        let watch_path = self
+            .config_path
+            .parent()
+            .ok_or_else(|| RuntimeError::ConfigError("Failed to get parent directory".to_string()))?;
+
+        info!("Starting file watcher for absolute path: {}", watch_path.display());
+        debug!("Watching config file: {}", config_path.display());
+
+        let mut debouncer = new_debouncer(
+            Duration::from_millis(100),
+            None,
+            move |res: std::result::Result<Vec<DebouncedEvent>, _>| match res {
+                Ok(events) => {
+                    for event in events {
+                        debug!("Received file system event: {:?}", event);
+                        if event.event.paths.iter().any(|p| p == &config_path) {
+                            info!("Detected change in config file: {}", config_path.display());
+                            if let Err(e) = tx.blocking_send(()) {
+                                error!("Failed to send reload signal: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => error!("Watch error: {:?}", e),
+            },
+        )
+        .map_err(|e| RuntimeError::Other(format!("Failed to create watcher: {}", e)))?;
+
+        debouncer
+            .watcher()
+            .configure(notify::Config::default()
+                .with_poll_interval(Duration::from_secs(1))
+                .with_compare_contents(true))
+            .map_err(|e| RuntimeError::Other(format!("Failed to configure watcher: {}", e)))?;
+
+        debouncer
+            .watcher()
+            .watch(watch_path, RecursiveMode::NonRecursive)
+            .map_err(|e| RuntimeError::Other(format!("Failed to watch config file: {}", e)))?;
+
+        let mut this = self.clone();
+        if let Some(this) = Arc::get_mut(&mut this) {
+            this.watcher = Some(debouncer);
+        }
 
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(reload_interval)).await;
-                if let Err(e) = self.reload().await {
-                    warn!("Failed to reload configuration: {}", e);
+            while rx.recv().await.is_some() {
+                debug!("Config file change detected, reloading...");
+                match manager.reload().await {
+                    Ok(()) => info!("Configuration reloaded successfully"),
+                    Err(e) => error!("Failed to reload configuration: {}", e),
                 }
             }
         });
+
+        Ok(())
+    }
+
+    pub async fn stop_file_watcher(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            drop(watcher);
+        }
+    }
+}
+
+impl Drop for ConfigManager {
+    fn drop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            drop(watcher);
+        }
     }
 }

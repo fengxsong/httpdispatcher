@@ -1,6 +1,6 @@
 use anyhow::{Error, Result};
 use clap::Parser;
-use httpdispatcher::{Config, Runtime};
+use httpdispatcher::Runtime;
 use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
@@ -60,20 +60,9 @@ async fn main() -> Result<(), Error> {
         std::env::set_var("DISPATCHER_ENABLE_AUTO_RELOAD", "1");
     }
 
-    // Load configuration
-    let config = Config::load(&args.config)?;
-
-    // Log component counts
-    info!(
-        "Configuration loaded successfully, Loaded {} sources, {} transforms, {} sinks",
-        config.sources.len(),
-        config.transforms.len(),
-        config.sinks.len()
-    );
-
     // Build and start runtime
     info!("Building runtime...");
-    let mut runtime = Runtime::build(&config, args.config).await?;
+    let mut runtime = Runtime::build(args.config).await?;
 
     info!("Starting pipeline execution...");
     runtime.run().await?;

@@ -1,11 +1,13 @@
 use crate::component::{Event, Sink, Source, Transform};
-use crate::config::{Config, ConfigManager};
+use crate::config::ConfigManager;
 use crate::error::{Result, RuntimeError};
 use dashmap::DashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
+#[derive(Debug)]
 pub struct Runtime {
     config_manager: Arc<ConfigManager>,
     tx: DashMap<String, broadcast::Sender<Event>>,
@@ -20,9 +22,23 @@ enum ComponentRef {
     Sink(Arc<Mutex<Box<dyn Sink>>>),
 }
 
+impl std::fmt::Debug for ComponentRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ComponentRef::Source(source) => {
+                write!(f, "Source({})", source.try_lock().unwrap().name())
+            }
+            ComponentRef::Transform(transform) => {
+                write!(f, "Transform({})", transform.try_lock().unwrap().name())
+            }
+            ComponentRef::Sink(sink) => write!(f, "Sink({})", sink.try_lock().unwrap().name()),
+        }
+    }
+}
+
 impl Runtime {
-    pub async fn build(config: &Config, config_path: String) -> Result<Self> {
-        let config_manager = Arc::new(ConfigManager::new(config_path, config.clone()));
+    pub async fn build(config_path: impl AsRef<Path>) -> Result<Self> {
+        let config_manager = ConfigManager::new(config_path).await?;
 
         let runtime = Runtime {
             config_manager: config_manager.clone(),
@@ -34,17 +50,36 @@ impl Runtime {
         // Initialize components
         runtime.initialize_components().await?;
 
-        // Start configuration auto-reload if enabled
+        // Start configuration file watcher if enabled
         if std::env::var("DISPATCHER_ENABLE_AUTO_RELOAD").is_ok() {
-            info!("Starting configuration auto-reload");
-            config_manager.clone().start_auto_reload().await;
-        }
+            if let Some(mut reload_rx) = config_manager.subscribe_to_reload() {
+                let runtime = Arc::new(runtime);
+                let runtime_weak = Arc::downgrade(&runtime);
 
-        Ok(runtime)
+                tokio::spawn(async move {
+                    while reload_rx.recv().await.is_ok() {
+                        if let Some(runtime) = runtime_weak.upgrade() {
+                            match runtime.reload().await {
+                                Ok(()) => info!("Runtime reloaded successfully"),
+                                Err(e) => error!("Failed to reload runtime: {}", e),
+                            }
+                        }
+                    }
+                });
+
+                config_manager.start_file_watcher().await?;
+                Ok(Arc::try_unwrap(runtime).expect("Runtime still has references"))
+            } else {
+                error!("Failed to subscribe to config reload notifications");
+                Ok(runtime)
+            }
+        } else {
+            Ok(runtime)
+        }
     }
 
     async fn initialize_components(&self) -> Result<()> {
-        let config = self.config_manager.get_config().await;
+        let config = self.config_manager.get_config();
         let config = config.read().await;
 
         // Initialize channels
@@ -104,20 +139,30 @@ impl Runtime {
     }
 
     pub async fn reload(&self) -> Result<()> {
-        info!("Reloading runtime configuration");
-
-        // Reload configuration
-        self.config_manager.reload().await?;
-
-        // Clear existing components
+        self.stop_all_components().await?;
         self.components.clear();
         self.tx.clear();
         self.rx.clear();
 
-        // Initialize with new configuration
         self.initialize_components().await?;
 
         info!("Runtime configuration reloaded successfully");
+        Ok(())
+    }
+
+    async fn stop_all_components(&self) -> Result<()> {
+        for pair in self.components.iter() {
+            if let ComponentRef::Source(source) = pair.value() {
+                let mut source = source.lock().await;
+                if let Err(e) = source.shutdown().await {
+                    error!("Error stopping source {}: {}", pair.key(), e);
+                }
+            }
+        }
+
+        // 等待所有处理中的事件完成
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
         Ok(())
     }
 
@@ -127,7 +172,7 @@ impl Runtime {
 
         for pair in runtime.components.iter() {
             let name = pair.key().clone();
-            let component = pair.value();
+            let component = pair.value().clone();
 
             match component {
                 ComponentRef::Transform(transform) => {
@@ -147,29 +192,25 @@ impl Runtime {
                             ));
                         }
 
-                        let tx = runtime
-                            .tx
-                            .get(&name)
-                            .ok_or_else(|| {
+                        let tx = {
+                            let sender = runtime.tx.get(&name).ok_or_else(|| {
                                 RuntimeError::channel_error(format!(
                                     "Channel not found for {}",
                                     name
                                 ))
-                            })?
-                            .value()
-                            .clone();
+                            })?;
+                            sender.value().clone()
+                        };
 
-                        let mut input_rx = runtime
-                            .rx
-                            .get(&input)
-                            .ok_or_else(|| {
+                        let mut input_rx = {
+                            let receiver = runtime.rx.get(&input).ok_or_else(|| {
                                 RuntimeError::channel_error(format!(
                                     "Channel not found for input {}",
                                     input
                                 ))
-                            })?
-                            .value()
-                            .resubscribe();
+                            })?;
+                            receiver.value().resubscribe()
+                        };
 
                         let transform = transform.clone();
 
@@ -223,17 +264,15 @@ impl Runtime {
                             ));
                         }
 
-                        let mut input_rx = runtime
-                            .rx
-                            .get(&input)
-                            .ok_or_else(|| {
+                        let mut input_rx = {
+                            let receiver = runtime.rx.get(&input).ok_or_else(|| {
                                 RuntimeError::channel_error(format!(
                                     "Channel not found for input {}",
                                     input
                                 ))
-                            })?
-                            .value()
-                            .resubscribe();
+                            })?;
+                            receiver.value().resubscribe()
+                        };
 
                         let sink = sink.clone();
 
@@ -265,7 +304,7 @@ impl Runtime {
                         tasks.push(task);
                     }
                 }
-                _ => {}
+                ComponentRef::Source(_) => {} // Sources don't need to be connected
             }
         }
 
@@ -273,66 +312,56 @@ impl Runtime {
     }
 
     pub async fn run(&self) -> Result<()> {
-        for (name, _) in &self.config_manager.get_config().await.read().await.sources {
-            let source = self.get_source(name)?;
-            let channel = self
-                .tx
-                .get(name)
-                .ok_or_else(|| {
-                    RuntimeError::channel_error(format!("Channel not found for source {}", name))
-                })?
-                .value()
-                .clone();
+        let mut tasks = Vec::new();
 
-            tokio::spawn(async move {
-                let mut source = source.lock().await;
-                let _ = source.run(channel).await;
-            });
+        // Start sources
+        for pair in self.components.iter() {
+            if let ComponentRef::Source(source) = pair.value() {
+                let source = source.clone();
+                let name = pair.key().clone();
+
+                let tx = self
+                    .tx
+                    .get(&name)
+                    .ok_or_else(|| {
+                        RuntimeError::channel_error(format!("Channel not found for {}", name))
+                    })?
+                    .value()
+                    .clone();
+
+                let task = tokio::spawn(async move {
+                    let mut guard = source.lock().await;
+                    if let Err(e) = guard.run(tx).await {
+                        error!("Source {} failed: {}", name, e);
+                    }
+                });
+
+                tasks.push(task);
+            }
         }
+
+        // Wait for all tasks to complete
+        for task in tasks {
+            task.await.map_err(|e| RuntimeError::Other(e.to_string()))?;
+        }
+
         Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        for name in self
-            .config_manager
-            .get_config()
-            .await
-            .read()
-            .await
-            .sources
-            .keys()
-        {
-            let source = self.get_source(name)?;
-            let mut source = source.lock().await;
-            if let Err(e) = source.shutdown().await {
-                error!("Error stopping source: {}", e);
+        // Stop file watcher if running
+        if std::env::var("DISPATCHER_ENABLE_AUTO_RELOAD").is_ok() {
+            if let Some(config_manager) = Arc::get_mut(&mut self.config_manager) {
+                config_manager.stop_file_watcher().await;
             }
         }
+
+        // Clear all components and channels
+        self.components.clear();
+        self.tx.clear();
+        self.rx.clear();
+
+        info!("Runtime shut down successfully");
         Ok(())
-    }
-}
-
-impl Runtime {
-    fn get_source(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Source>>>> {
-        match self.components.get(name).as_deref() {
-            Some(ComponentRef::Source(s)) => Ok(s.clone()),
-            _ => Err(RuntimeError::component_not_found(name.to_string())),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn get_transform(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Transform>>>> {
-        match self.components.get(name).as_deref() {
-            Some(ComponentRef::Transform(t)) => Ok(t.clone()),
-            _ => Err(RuntimeError::component_not_found(name.to_string())),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn get_sink(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Sink>>>> {
-        match self.components.get(name).as_deref() {
-            Some(ComponentRef::Sink(s)) => Ok(s.clone()),
-            _ => Err(RuntimeError::component_not_found(name.to_string())),
-        }
     }
 }
