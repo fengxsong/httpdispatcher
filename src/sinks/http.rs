@@ -1,5 +1,5 @@
 use crate::component::{Component, Event, Sink};
-use crate::config::SinkConfig;
+use crate::config::HttpSinkConfig;
 use crate::sinks::render::load_template;
 use anyhow::{anyhow, Context, Error, Result};
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ pub struct HttpSink {
 }
 
 impl HttpSink {
-    pub fn new(name: String, config: SinkConfig) -> Result<Self, Error> {
+    pub fn new(name: String, config: HttpSinkConfig) -> Result<Self, Error> {
         let mut client_builder = Client::builder()
             .redirect(match config.follow_redirects {
                 true => reqwest::redirect::Policy::default(),
@@ -67,7 +67,7 @@ impl HttpSink {
             name,
             inputs: config.inputs,
             client,
-            uri: config.uri.unwrap(),
+            uri: config.uri,
             method: config.method,
             headers: config.headers,
             query_params: config.query_params,

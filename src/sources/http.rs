@@ -1,5 +1,5 @@
 use crate::component::{Component, Event, Source};
-use crate::config::SourceConfig;
+use crate::config::HttpSourceConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
 use axum::{
@@ -25,7 +25,7 @@ use tracing::{debug, error, info, warn};
 
 pub struct HttpSource {
     name: String,
-    config: SourceConfig,
+    config: HttpSourceConfig,
     tx: Option<broadcast::Sender<Event>>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -42,7 +42,7 @@ impl Clone for HttpSource {
 }
 
 impl HttpSource {
-    pub fn new(name: String, config: SourceConfig) -> Result<Self, Error> {
+    pub fn new(name: String, config: HttpSourceConfig) -> Result<Self, Error> {
         Ok(Self {
             name,
             config,

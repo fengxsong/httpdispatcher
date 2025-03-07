@@ -1,5 +1,5 @@
 use crate::component::{Component, Event, Transform};
-use crate::config::TransformConfig;
+use crate::config::RemapTransformConfig;
 use anyhow::{anyhow, Error, Result};
 use async_trait::async_trait;
 use std::any::Any;
@@ -22,7 +22,7 @@ pub struct VrlTransform {
 }
 
 impl VrlTransform {
-    pub fn new(name: String, config: &TransformConfig) -> Result<Self, Error> {
+    pub fn new(name: String, config: RemapTransformConfig) -> Result<Self, Error> {
         let fns = vrl::stdlib::all();
         let result = vrl::compiler::compile(&config.source, &fns)
             .map_err(|e| anyhow!("Failed to compile VRL transform: {:?}", e))?;

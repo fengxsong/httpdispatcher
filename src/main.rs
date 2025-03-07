@@ -1,14 +1,6 @@
-mod component;
-mod config;
-mod runtime;
-mod sinks;
-mod sources;
-mod transforms;
-
 use anyhow::{Error, Result};
 use clap::Parser;
-use config::Config;
-use runtime::Runtime;
+use httpdispatcher::{Config, Runtime};
 use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
@@ -34,6 +26,9 @@ struct Args {
 
     #[arg(long, short = 'v', help = "Print version information")]
     version: bool,
+
+    #[arg(long, help = "Enable configuration auto-reload")]
+    auto_reload: bool,
 }
 
 #[tokio::main]
@@ -60,6 +55,11 @@ async fn main() -> Result<(), Error> {
         .with(fmt_layer)
         .init();
 
+    // Set auto-reload environment variable if enabled
+    if args.auto_reload {
+        std::env::set_var("DISPATCHER_ENABLE_AUTO_RELOAD", "1");
+    }
+
     // Load configuration
     let config = Config::load(&args.config)?;
 
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Error> {
 
     // Build and start runtime
     info!("Building runtime...");
-    let mut runtime = Runtime::build(&config).await?;
+    let mut runtime = Runtime::build(&config, args.config).await?;
 
     info!("Starting pipeline execution...");
     runtime.run().await?;
