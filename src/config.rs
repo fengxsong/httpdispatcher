@@ -25,9 +25,14 @@ impl Default for Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SourceConfig {
-    #[serde(rename = "type")]
-    pub type_: String,
+#[serde(tag = "type")]
+pub enum SourceConfig {
+    #[serde(rename = "http")]
+    Http(HttpSourceConfig),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HttpSourceConfig {
     #[serde(default = "default_address")]
     pub address: String,
     #[serde(default = "default_port")]
@@ -42,43 +47,34 @@ pub struct SourceConfig {
     pub basic_auth: Option<String>,
 }
 
-fn default_address() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_port() -> Option<u16> {
-    Some(3000)
-}
-
-fn default_path() -> String {
-    "/ingest".to_string()
-}
-
-fn default_max_body_size() -> Option<usize> {
-    Some(1048576) // 1MB
-}
-
-fn default_enable_echo() -> Option<bool> {
-    Some(true)
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum TransformConfig {
+    #[serde(rename = "remap")]
+    Remap(RemapTransformConfig),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct TransformConfig {
-    #[serde(rename = "type")]
-    pub type_: String,
+pub struct RemapTransformConfig {
     #[serde(default)]
     pub inputs: Vec<String>,
     pub source: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SinkConfig {
-    #[serde(rename = "type")]
-    pub type_: String,
+#[serde(tag = "type")]
+pub enum SinkConfig {
+    #[serde(rename = "http")]
+    Http(HttpSinkConfig),
+    #[serde(rename = "console")]
+    Console(ConsoleSinkConfig),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HttpSinkConfig {
     #[serde(default)]
     pub inputs: Vec<String>,
-    #[serde(default)]
-    pub uri: Option<String>,
+    pub uri: String,
     #[serde(default)]
     pub encoding: Option<String>,
     #[serde(default)]
@@ -111,12 +107,42 @@ pub struct SinkConfig {
     pub tls: Option<TlsConfig>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ConsoleSinkConfig {
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+fn default_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_port() -> Option<u16> {
+    Some(3000)
+}
+
+fn default_path() -> String {
+    "/ingest".to_string()
+}
+
+fn default_max_body_size() -> Option<usize> {
+    Some(1048576) // 1MB
+}
+
+fn default_enable_echo() -> Option<bool> {
+    Some(true)
+}
+
 fn default_method() -> Option<String> {
     Some("POST".to_string())
 }
 
 fn default_timeout() -> Option<u64> {
-    Some(30000) // 30秒
+    Some(30000)
 }
 
 fn default_retry_attempts() -> Option<u32> {
@@ -124,7 +150,7 @@ fn default_retry_attempts() -> Option<u32> {
 }
 
 fn default_retry_interval() -> Option<u64> {
-    Some(1000) // 1秒
+    Some(1000)
 }
 
 fn default_follow_redirects() -> bool {
