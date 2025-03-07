@@ -1,19 +1,19 @@
 use crate::component::{Event, Sink, Source, Transform};
-use crate::config::Config;
-use anyhow::{anyhow, Context, Error, Result};
-use std::collections::HashMap;
+use crate::config::{Config, ConfigManager};
+use crate::error::{Result, RuntimeError};
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
-
 pub struct Runtime {
-    config: Config,
-    tx: HashMap<String, broadcast::Sender<Event>>,
-    rx: HashMap<String, broadcast::Receiver<Event>>,
-    components: HashMap<String, ComponentRef>,
+    config_manager: Arc<ConfigManager>,
+    tx: DashMap<String, broadcast::Sender<Event>>,
+    rx: DashMap<String, broadcast::Receiver<Event>>,
+    components: DashMap<String, ComponentRef>,
 }
 
+#[derive(Clone)]
 enum ComponentRef {
     Source(Arc<Mutex<Box<dyn Source>>>),
     Transform(Arc<Mutex<Box<dyn Transform>>>),
@@ -21,90 +21,154 @@ enum ComponentRef {
 }
 
 impl Runtime {
-    pub async fn build(config: &Config) -> Result<Self, Error> {
-        let mut runtime = Runtime {
-            config: config.clone(),
-            components: HashMap::new(),
-            tx: Default::default(),
-            rx: Default::default(),
+    pub async fn build(config: &Config, config_path: String) -> Result<Self> {
+        let config_manager = Arc::new(ConfigManager::new(config_path, config.clone()));
+        
+        let runtime = Runtime {
+            config_manager: config_manager.clone(),
+            components: DashMap::new(),
+            tx: DashMap::new(),
+            rx: DashMap::new(),
         };
 
-        config.sources.keys().chain(config.transforms.keys()).into_iter().for_each(|name| {
-            let (sender, receiver) = broadcast::channel(100);
-            runtime.tx.insert(name.to_string(), sender);
-            runtime.rx.insert(name.to_string(), receiver);
-        });
+        // Initialize components
+        runtime.initialize_components().await?;
 
-        for (name, config) in &config.sources {
-            let source = crate::sources::create_source(name.to_string(), config.clone())?;
-            runtime.components.insert(
+        // Start configuration auto-reload if enabled
+        if std::env::var("DISPATCHER_ENABLE_AUTO_RELOAD").is_ok() {
+            info!("Starting configuration auto-reload");
+            config_manager.clone().start_auto_reload().await;
+        }
+
+        Ok(runtime)
+    }
+
+    async fn initialize_components(&self) -> Result<()> {
+        let config = self.config_manager.get_config().await;
+        let config = config.read().await;
+
+        // Initialize channels
+        config
+            .sources
+            .keys()
+            .chain(config.transforms.keys())
+            .for_each(|name| {
+                let (sender, receiver) = broadcast::channel(config.channel_capacity);
+                self.tx.insert(name.to_string(), sender);
+                self.rx.insert(name.to_string(), receiver);
+            });
+
+        // Create sources
+        for (name, source_config) in &config.sources {
+            let source = crate::sources::create_source(name.to_string(), source_config.clone())
+                .map_err(|e| RuntimeError::init_error(format!("Failed to create source {}: {}", name, e)))?;
+            self.components.insert(
                 name.to_string(),
                 ComponentRef::Source(Arc::new(Mutex::new(source))),
             );
         }
 
-        for (name, config) in &config.transforms {
-            let transform = crate::transforms::create_transform(name.to_string(), config.clone())?;
-            runtime.components.insert(
+        // Create transforms
+        for (name, transform_config) in &config.transforms {
+            let transform = crate::transforms::create_transform(name.to_string(), transform_config.clone())
+                .map_err(|e| RuntimeError::init_error(format!("Failed to create transform {}: {}", name, e)))?;
+            self.components.insert(
                 name.to_string(),
                 ComponentRef::Transform(Arc::new(Mutex::new(transform))),
             );
         }
 
-        for (name, config) in &config.sinks {
-            let sink = crate::sinks::create_sink(name.to_string(), config.clone())?;
-            runtime.components.insert(
+        // Create sinks
+        for (name, sink_config) in &config.sinks {
+            let sink = crate::sinks::create_sink(name.to_string(), sink_config.clone())
+                .map_err(|e| RuntimeError::init_error(format!("Failed to create sink {}: {}", name, e)))?;
+            self.components.insert(
                 name.to_string(),
                 ComponentRef::Sink(Arc::new(Mutex::new(sink))),
             );
         }
 
-        Self::connect_pipelines(&mut runtime, config).await?;
+        Runtime::connect_pipelines(self).await?;
 
-        Ok(runtime)
+        Ok(())
     }
 
-    async fn connect_pipelines(runtime: &mut Runtime, config: &Config) -> Result<(), Error> {
-        for (name, c) in &runtime.components {
-            match c {
-                ComponentRef::Transform(t) => {
-                    let transform = t.clone();
-                    let tx = runtime.tx.get(name).unwrap().clone();
+    pub async fn reload(&self) -> Result<()> {
+        info!("Reloading runtime configuration");
+        
+        // Reload configuration
+        self.config_manager.reload().await?;
+        
+        // Clear existing components
+        self.components.clear();
+        self.tx.clear();
+        self.rx.clear();
+        
+        // Initialize with new configuration
+        self.initialize_components().await?;
+        
+        info!("Runtime configuration reloaded successfully");
+        Ok(())
+    }
+
+    async fn connect_pipelines(runtime: &Runtime) -> Result<()> {
+        // Store all spawned tasks
+        let mut tasks = Vec::new();
+
+        for pair in runtime.components.iter() {
+            let name = pair.key().clone();
+            let component = pair.value();
+            
+            match component {
+                ComponentRef::Transform(transform) => {
+                    let transform = transform.clone();
+
+                    // Get inputs before spawning tasks
                     let inputs = {
                         let guard = transform.lock().await;
                         guard.inputs().to_vec()
                     };
+
                     for input in inputs {
                         if !runtime.components.contains_key(&input) {
-                            return Err(anyhow!("Transform {} has input {} which is not a component",name,input));
+                            return Err(RuntimeError::invalid_input(
+                                name.clone(),
+                                format!("Input {} not found", input),
+                            ));
                         }
-                        let input_rx = runtime.rx.get(&input).unwrap().clone();
+
+                        let tx = runtime.tx.get(&name).ok_or_else(|| {
+                            RuntimeError::channel_error(format!("Channel not found for {}", name))
+                        })?.value().clone();
+                        
+                        let mut input_rx = runtime.rx.get(&input).ok_or_else(|| {
+                            RuntimeError::channel_error(format!("Channel not found for input {}", input))
+                        })?.value().resubscribe();
+                        
+                        let transform = transform.clone();
+
+                        // Log connection
                         {
                             let guard = transform.lock().await;
-                            info!(
-                                "Connecting transform {} to input {}",
-                                guard.name(),
-                                input
-                            );
+                            info!("Connecting transform {} to input {}", guard.name(), input);
                         }
-                        let transform_clone = transform.clone();
-                        tokio::spawn(async move {
-                            let mut rx = input_rx;
-                            while let Ok(event) = rx.recv().await {
+
+                        let task = tokio::spawn(async move {
+                            while let Ok(event) = input_rx.recv().await {
                                 let processed = {
-                                    let mut guard = transform_clone.lock().await;
+                                    let guard = transform.lock().await;
                                     guard.transform(&event).await
                                 };
-                                
+
                                 match processed {
                                     Ok(processed_event) => {
                                         let _ = tx.send(processed_event);
                                     }
                                     Err(e) => {
-                                        let name = transform_clone.lock().await.name();
+                                        let guard = transform.lock().await;
                                         error!(
                                             "Transform {} failed to process event: {:?}, err: {}",
-                                            name,
+                                            guard.name(),
                                             event.id,
                                             e
                                         );
@@ -112,73 +176,74 @@ impl Runtime {
                                 }
                             }
                         });
+
+                        tasks.push(task);
                     }
                 }
-                ComponentRef::Sink(s) => {
-                    let sink = s.clone(); // 克隆 Arc<Mutex<Box<dyn Sink>>>
-                    
-                    // 获取输入列表
+                ComponentRef::Sink(sink) => {
+                    let sink = sink.clone();
+
+                    // Get inputs before spawning tasks
                     let inputs = {
                         let guard = sink.lock().await;
-                        guard.inputs().to_vec() // 复制输入列表，避免持有锁
+                        guard.inputs().to_vec()
                     };
-                    
+
                     for input in inputs {
                         if !runtime.components.contains_key(&input) {
-                            return Err(anyhow!(
-                                "Sink {} has input {} which is not a component",
-                                name,
-                                input
+                            return Err(RuntimeError::invalid_input(
+                                name.clone(),
+                                format!("Input {} not found", input),
                             ));
                         }
-                        let input_rx = runtime.rx.get(&input).unwrap().resubscribe();
+
+                        let mut input_rx = runtime.rx.get(&input).ok_or_else(|| {
+                            RuntimeError::channel_error(format!("Channel not found for input {}", input))
+                        })?.value().resubscribe();
                         
-                        // 记录连接信息
+                        let sink = sink.clone();
+
+                        // Log connection
                         {
                             let guard = sink.lock().await;
-                            info!(
-                                "Connecting sink {} to input {}",
-                                guard.name(),
-                                input
-                            );
+                            info!("Connecting sink {} to input {}", guard.name(), input);
                         }
-                        
-                        let sink_clone = sink.clone();
-                        tokio::spawn(async move {
-                            let mut rx = input_rx;
-                            while let Ok(event) = rx.recv().await {
+
+                        let task = tokio::spawn(async move {
+                            while let Ok(event) = input_rx.recv().await {
                                 let processed = {
-                                    let mut guard = sink_clone.lock().await;
+                                    let mut guard = sink.lock().await;
                                     guard.process(&event).await
                                 };
-                                
-                                match processed {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        let name = sink_clone.lock().await.name();
-                                        error!(
-                                            "Sink {} failed to process event: {:?}, err: {}",
-                                            name,
-                                            &event.id,
-                                            e
-                                        );
-                                    }
+
+                                if let Err(e) = processed {
+                                    let guard = sink.lock().await;
+                                    error!(
+                                        "Sink {} failed to process event: {:?}, err: {}",
+                                        guard.name(),
+                                        event.id,
+                                        e
+                                    );
                                 }
                             }
                         });
+
+                        tasks.push(task);
                     }
                 }
                 _ => {}
             }
         }
- 
+
         Ok(())
     }
 
-    pub async fn run(&self) -> Result<(), Error> {
-        for (name, _) in &self.config.sources {
+    pub async fn run(&self) -> Result<()> {
+        for (name, _) in &self.config_manager.get_config().await.read().await.sources {
             let source = self.get_source(name)?;
-            let channel = self.tx.get(name).unwrap().clone();
+            let channel = self.tx.get(name).ok_or_else(|| {
+                RuntimeError::channel_error(format!("Channel not found for source {}", name))
+            })?.value().clone();
 
             tokio::spawn(async move {
                 let mut source = source.lock().await;
@@ -188,8 +253,8 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) -> Result<(), Error> {
-        for name in self.config.sources.keys() {
+    pub async fn shutdown(&mut self) -> Result<()> {
+        for name in self.config_manager.get_config().await.read().await.sources.keys() {
             let source = self.get_source(name)?;
             let mut source = source.lock().await;
             if let Err(e) = source.shutdown().await {
@@ -201,24 +266,26 @@ impl Runtime {
 }
 
 impl Runtime {
-    fn get_source(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Source>>>, Error> {
-        match self.components.get(name) {
+    fn get_source(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Source>>>> {
+        match self.components.get(name).as_deref() {
             Some(ComponentRef::Source(s)) => Ok(s.clone()),
-            _ => Err(anyhow!("Source {} not found", name)),
+            _ => Err(RuntimeError::component_not_found(name.to_string())),
         }
     }
 
-    fn get_transform(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Transform>>>, Error> {
-        match self.components.get(name) {
+    #[allow(dead_code)]
+    fn get_transform(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Transform>>>> {
+        match self.components.get(name).as_deref() {
             Some(ComponentRef::Transform(t)) => Ok(t.clone()),
-            _ => Err(anyhow!("Transform {} not found", name)),
+            _ => Err(RuntimeError::component_not_found(name.to_string())),
         }
     }
 
-    fn get_sink(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Sink>>>, Error> {
-        match self.components.get(name) {
+    #[allow(dead_code)]
+    fn get_sink(&self, name: &str) -> Result<Arc<Mutex<Box<dyn Sink>>>> {
+        match self.components.get(name).as_deref() {
             Some(ComponentRef::Sink(s)) => Ok(s.clone()),
-            _ => Err(anyhow!("Sink {} not found", name)),
+            _ => Err(RuntimeError::component_not_found(name.to_string())),
         }
     }
 }

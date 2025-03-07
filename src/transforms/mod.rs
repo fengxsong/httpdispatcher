@@ -2,7 +2,7 @@ mod vrl;
 
 use crate::component::Transform;
 use crate::config::TransformConfig;
-use anyhow::{ Error, Result};
+use anyhow::{Error, Result};
 
 pub use vrl::VrlTransform;
 
