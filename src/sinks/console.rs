@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::to_string_pretty;
 use std::any::Any;
 use tera::Tera;
-use tracing::info;
+use tracing::debug;
 
 use super::render::load_template;
 
@@ -72,26 +72,23 @@ impl Component for ConsoleSink {
 #[async_trait]
 impl Sink for ConsoleSink {
     async fn process(&mut self, event: &Event) -> Result<(), Error> {
-        match &self.format {
+        let output = match &self.format {
             OutputFormat::Text { template: _ } => {
                 if let Some(template) = &self.template {
                     let context = tera::Context::from_serialize(&event.data)?;
-                    let output = template
+                    template
                         .render(&self.name, &context)
-                        .map_err(|e| anyhow!("{:?}", e))?;
-                    info!("{}", output);
+                        .map_err(|e| anyhow!("{:?}", e))?
                 } else {
-                    info!(
-                        "Consuming event:\nID: {}\nData: {}\nMetadata: {}",
-                        event.id, event.data, event.metadata
-                    );
+                    event.data.to_string()
                 }
             }
-            OutputFormat::Json => {
-                let json_output = to_string_pretty(&event.data)?;
-                info!("Consuming event:\n{}", json_output);
-            }
-        }
+            OutputFormat::Json => to_string_pretty(&event.data)?,
+        };
+        debug!(
+            "processed event ID: {}, Data: {}, Metadata: {}",
+            event.id, output, event.metadata
+        );
         Ok(())
     }
 
