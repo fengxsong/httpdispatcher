@@ -304,7 +304,12 @@ impl Runtime {
                         tasks.push(task);
                     }
                 }
-                ComponentRef::Source(_) => {} // Sources don't need to be connected
+                ComponentRef::Source(source) => {
+                    info!(
+                        "source {} don't need to be connected",
+                        source.lock().await.name()
+                    );
+                } // Sources don't need to be connected
             }
         }
 

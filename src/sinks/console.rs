@@ -1,4 +1,5 @@
 use crate::component::{Component, Event, Sink};
+use crate::config::ConsoleSinkConfig;
 use anyhow::{anyhow, Context, Error, Result};
 use async_trait::async_trait;
 use serde_json::to_string_pretty;
@@ -11,6 +12,7 @@ use super::render::load_template;
 #[derive(Debug)]
 pub struct ConsoleSink {
     name: String,
+    inputs: Vec<String>,
     format: OutputFormat,
     template: Option<Tera>,
 }
@@ -22,7 +24,16 @@ pub enum OutputFormat {
 }
 
 impl ConsoleSink {
-    pub fn new(name: String, format: OutputFormat) -> Result<Self, Error> {
+    pub fn new(name: String, config: ConsoleSinkConfig) -> Result<Self, Error> {
+        let encoding = config.encoding.clone().unwrap_or("text".to_string());
+        let format = match encoding.as_str() {
+            "json" => OutputFormat::Json,
+            "text" => OutputFormat::Text {
+                template: config.template.clone(),
+            },
+            _ => return Err(anyhow!("Unknown encoding: {}", encoding)),
+        };
+
         let mut template = None;
         if let OutputFormat::Text {
             template: Some(tpl),
@@ -33,10 +44,11 @@ impl ConsoleSink {
             tera.add_raw_template(&name, &content)
                 .context(anyhow!("Failed to add template"))?;
             template = Some(tera);
-        }
+        };
 
         Ok(Self {
             name,
+            inputs: config.inputs.clone(),
             format,
             template,
         })
@@ -53,7 +65,7 @@ impl Component for ConsoleSink {
     }
 
     fn inputs(&self) -> &[String] {
-        &[]
+        &self.inputs
     }
 }
 

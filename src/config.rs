@@ -327,14 +327,13 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub async fn new(config_path: impl AsRef<Path>) -> Result<Arc<Self>, RuntimeError> {
-        let config_path = config_path
-            .as_ref()
-            .canonicalize()
-            .map_err(|e| RuntimeError::ConfigError(format!("Failed to get absolute path: {}", e)))?;
-        
+        let config_path = config_path.as_ref().canonicalize().map_err(|e| {
+            RuntimeError::ConfigError(format!("Failed to get absolute path: {}", e))
+        })?;
+
         let config = Config::load(&config_path).await?;
         let (reload_tx, _) = broadcast::channel(1);
-        
+
         Ok(Arc::new(Self {
             config: Arc::new(RwLock::new(config)),
             config_path,
@@ -368,12 +367,14 @@ impl ConfigManager {
         let config_path = self.config_path.clone();
         let manager = self.clone();
 
-        let watch_path = self
-            .config_path
-            .parent()
-            .ok_or_else(|| RuntimeError::ConfigError("Failed to get parent directory".to_string()))?;
+        let watch_path = self.config_path.parent().ok_or_else(|| {
+            RuntimeError::ConfigError("Failed to get parent directory".to_string())
+        })?;
 
-        info!("Starting file watcher for absolute path: {}", watch_path.display());
+        info!(
+            "Starting file watcher for absolute path: {}",
+            watch_path.display()
+        );
         debug!("Watching config file: {}", config_path.display());
 
         let mut debouncer = new_debouncer(
@@ -398,9 +399,11 @@ impl ConfigManager {
 
         debouncer
             .watcher()
-            .configure(notify::Config::default()
-                .with_poll_interval(Duration::from_secs(1))
-                .with_compare_contents(true))
+            .configure(
+                notify::Config::default()
+                    .with_poll_interval(Duration::from_secs(1))
+                    .with_compare_contents(true),
+            )
             .map_err(|e| RuntimeError::Other(format!("Failed to configure watcher: {}", e)))?;
 
         debouncer
