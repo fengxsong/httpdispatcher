@@ -127,7 +127,7 @@ impl Transform for VrlTransform {
         // This executes the VRL program, making any modifications to the target, and returning a result.
         let result = self.result.program.resolve(&mut ctx)?;
 
-        debug!("VRL transform result: {:?}", result);
+        debug!("VRL transform result: {}", result.to_string());
         let transformed_data = Self::convert_from_vrl_value(result);
         Ok(Event {
             id: event.clone().id,

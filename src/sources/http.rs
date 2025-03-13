@@ -42,6 +42,11 @@ impl Clone for HttpSource {
 }
 
 impl HttpSource {
+    const ID_ALPHABET: [char; 36] = [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
+        'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    ];
+
     pub fn new(name: String, config: HttpSourceConfig) -> Result<Self, Error> {
         Ok(Self {
             name,
@@ -51,7 +56,7 @@ impl HttpSource {
         })
     }
 
-    async fn handle_echo(req: Request<axum::body::Body>) -> impl IntoResponse {
+    async fn process_request(req: Request<axum::body::Body>) -> Result<Value, (StatusCode, Value)> {
         let (parts, body) = req.into_parts();
         let headers = parts.headers;
         let uri = parts.uri;
@@ -61,11 +66,10 @@ impl HttpSource {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to read body: {}", e);
-                return (
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
-                    .into_response();
+                    json!({"error": e.to_string()}),
+                ));
             }
         };
 
@@ -86,38 +90,47 @@ impl HttpSource {
             "body": body_json
         });
 
-        (StatusCode::OK, Json(request_info)).into_response()
+        Ok(request_info)
+    }
+
+    async fn handle_echo(req: Request<axum::body::Body>) -> impl IntoResponse {
+        match Self::process_request(req).await {
+            Ok(request_info) => (StatusCode::OK, Json(request_info)).into_response(),
+            Err((status, error)) => (status, Json(error)).into_response(),
+        }
     }
 
     async fn handle_request(
-        Json(payload): Json<Value>,
+        req: Request<axum::body::Body>,
         tx: Arc<broadcast::Sender<Event>>,
     ) -> impl IntoResponse {
-        let event = Event {
-            id: nanoid!(16),
-            data: payload,
-            metadata: Value::Object(Default::default()),
-        };
+        match Self::process_request(req).await {
+            Ok(request_info) => {
+                let event = Event {
+                    id: nanoid!(16, &Self::ID_ALPHABET),
+                    data: json!({"req": request_info}),
+                    metadata: Value::Object(Default::default()),
+                };
 
-        match tx.send(event.clone()) {
-            Ok(_) => {
-                debug!("Successfully processed event: {}", &event.id);
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "event_id": &event.id })),
-                )
-                    .into_response()
+                match tx.send(event.clone()) {
+                    Ok(_) => {
+                        debug!("Successfully processed event: {}", &event.id);
+                        (StatusCode::OK, Json(json!({ "event_id": &event.id })))
+                    }
+                    Err(e) => {
+                        error!("Failed to process event {}: {}", &event.id, e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "event_id": &event.id,
+                                "error": e.to_string()
+                            })),
+                        )
+                    }
+                }
+                .into_response()
             }
-            Err(e) => {
-                error!("Failed to process event {}: {}", &event.id, e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!(
-                        { "event_id": &event.id, "error": e.to_string() }
-                    )),
-                )
-                    .into_response()
-            }
+            Err((status, error)) => (status, Json(error)).into_response(),
         }
     }
 }
@@ -153,8 +166,8 @@ impl Source for HttpSource {
 
         let mut app = Router::new()
             .route(
-                &self.config.path,
-                post(move |payload| HttpSource::handle_request(payload, tx_clone)),
+                &format!("{}{}", self.config.path_prefix, "{*path}"),
+                post(move |req| Self::handle_request(req, tx_clone.clone())),
             )
             .layer(
                 TraceLayer::new_for_http()
@@ -187,14 +200,17 @@ impl Source for HttpSource {
             );
 
         if self.config.enable_echo.unwrap_or(false) {
-            app = app.route("/echo", get(Self::handle_echo).post(Self::handle_echo))
+            app = app.route(
+                &format!("{}echo", self.config.path_prefix),
+                get(Self::handle_echo).post(Self::handle_echo),
+            );
         }
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 
         let server = axum::serve(listener, app);
 
-        info!("HTTP source listening on {}", addr);
+        info!("HTTP source {} listening on {}", self.name, addr);
 
         self.server_handle = Some(tokio::spawn(async move {
             if let Err(e) = server.await {

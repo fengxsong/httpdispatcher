@@ -49,8 +49,8 @@ pub struct HttpSourceConfig {
     pub address: String,
     #[serde(default = "default_port")]
     pub port: Option<u16>,
-    #[serde(default = "default_path")]
-    pub path: String,
+    #[serde(default = "default_path_prefix")]
+    pub path_prefix: String,
     #[serde(default = "default_max_body_size")]
     pub max_body_size_bytes: Option<usize>,
     #[serde(default = "default_enable_echo")]
@@ -137,10 +137,6 @@ fn default_port() -> Option<u16> {
     Some(3000)
 }
 
-fn default_path() -> String {
-    "/ingest".to_string()
-}
-
 fn default_max_body_size() -> Option<usize> {
     Some(1048576) // 1MB
 }
@@ -167,6 +163,10 @@ fn default_retry_interval() -> Option<u64> {
 
 fn default_follow_redirects() -> bool {
     true
+}
+
+fn default_path_prefix() -> String {
+    "/api/".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
