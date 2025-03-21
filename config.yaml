@@ -1,23 +1,32 @@
 sources:
-  alertmanager:
+  enqueue:
     type: http
-    address: 0.0.0.0
     port: 9090
-    path: /alerts
-    max_body_size_bytes: 1048576
 
 transforms:
   testvrl:
     type: remap
-    inputs: ["alertmanager"]
+    inputs: ["enqueue"]
     source: |
+      if exists(.req.body) {
+        . = merge!(., .req.body)
+        del(.req.body)
+      }
       .
+
+  testreroute:
+    type: route
+    inputs: ["enqueue"]
+    reroute_unmatched: true
+    routes:
+      resolved:
+        source: .req.body.status == "resolved"
 
 sinks:
   api_output:
     type: http
     inputs: ["testvrl"]
-    uri: "https://open.feishu.cn/open-apis/bot/v2/hook/fddc37b3-2882-4d8f-90f2-279d307505e5"
+    uri: "https://open.feishu.cn/open-apis/bot/v2/hook/{{ boturl }}"
     template: file://./feishu.j2
     headers:
       Content-Type: "application/json"
@@ -25,8 +34,12 @@ sinks:
     retry_attempts: 3
     retry_interval_ms: 1000
 
+  debug_unmatched:
+    type: console
+    inputs: ["testreroute._unmatched"]
+    encoding: json
+
   debug_output:
     type: console
-    inputs: ["testvrl"]
-    encoding: text
-    template: file://./feishu.j2
+    inputs: ["testreroute.resolved"]
+    encoding: json

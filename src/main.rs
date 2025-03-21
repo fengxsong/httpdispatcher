@@ -27,7 +27,12 @@ struct Args {
     #[arg(long, short = 'v', help = "Print version information")]
     version: bool,
 
-    #[arg(long, help = "Enable configuration auto-reload")]
+    #[arg(
+        long,
+        default_value = "true",
+        hide = true,
+        help = "Enable configuration auto-reload"
+    )]
     auto_reload: bool,
 }
 

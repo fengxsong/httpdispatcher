@@ -64,12 +64,28 @@ pub struct HttpSourceConfig {
 pub enum TransformConfig {
     #[serde(rename = "remap")]
     Remap(RemapTransformConfig),
+    #[serde(rename = "route")]
+    Route(RouteTransformConfig),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RemapTransformConfig {
     #[serde(default)]
     pub inputs: Vec<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RouteTransformConfig {
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    pub routes: HashMap<String, RouteRule>,
+    #[serde(default)]
+    pub reroute_unmatched: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RouteRule {
     pub source: String,
 }
 
@@ -220,6 +236,27 @@ impl Config {
         Ok(config)
     }
 
+    pub fn channel_names(&self) -> Vec<String> {
+        let mut channel_names = Vec::new();
+        for name in self.sources.keys() {
+            channel_names.push(name.to_string());
+        }
+        for (name, cfg) in self.transforms.iter() {
+            if let crate::config::TransformConfig::Route(route_cfg) = cfg {
+                for route_name in route_cfg.routes.keys() {
+                    channel_names.push(format!("{}.{}", name, route_name));
+                }
+                if route_cfg.reroute_unmatched {
+                    channel_names.push(format!("{}._unmatched", name));
+                }
+            }
+            // although it is not necessary to create the channel for the route itself,
+            // it is done to avoid the channel not being found during the initialize_components.
+            channel_names.push(name.to_string());
+        }
+        channel_names
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         // Validate sources
@@ -243,6 +280,9 @@ impl Config {
                     if remap.source.is_empty() {
                         return Err(anyhow!("Transform {} has empty VRL source", name));
                     }
+                }
+                TransformConfig::Route(_) => {
+                    // todo
                 }
             }
         }
@@ -274,12 +314,7 @@ impl Config {
 
     /// Validate that all pipeline connections are valid
     fn validate_pipeline_connections(&self) -> Result<()> {
-        let available_outputs: Vec<String> = self
-            .sources
-            .keys()
-            .cloned()
-            .chain(self.transforms.keys().cloned())
-            .collect();
+        let available_outputs = self.channel_names();
 
         // Validate transform inputs
         for (name, transform) in &self.transforms {
@@ -294,6 +329,9 @@ impl Config {
                             ));
                         }
                     }
+                }
+                TransformConfig::Route(_) => {
+                    // todo
                 }
             }
         }
@@ -367,15 +405,7 @@ impl ConfigManager {
         let config_path = self.config_path.clone();
         let manager = self.clone();
 
-        let watch_path = self.config_path.parent().ok_or_else(|| {
-            RuntimeError::ConfigError("Failed to get parent directory".to_string())
-        })?;
-
-        info!(
-            "Starting file watcher for absolute path: {}",
-            watch_path.display()
-        );
-        debug!("Watching config file: {}", config_path.display());
+        debug!("Watching config file: {}", &config_path.display());
 
         let mut debouncer = new_debouncer(
             Duration::from_millis(100),
@@ -385,7 +415,7 @@ impl ConfigManager {
                     for event in events {
                         debug!("Received file system event: {:?}", event);
                         if event.event.paths.iter().any(|p| p == &config_path) {
-                            info!("Detected change in config file: {}", config_path.display());
+                            info!("Detected change in config file: {}", &config_path.display());
                             if let Err(e) = tx.blocking_send(()) {
                                 error!("Failed to send reload signal: {}", e);
                             }
@@ -408,7 +438,7 @@ impl ConfigManager {
 
         debouncer
             .watcher()
-            .watch(watch_path, RecursiveMode::NonRecursive)
+            .watch(&self.config_path, RecursiveMode::NonRecursive)
             .map_err(|e| RuntimeError::Other(format!("Failed to watch config file: {}", e)))?;
 
         let mut this = self.clone();

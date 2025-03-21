@@ -83,15 +83,11 @@ impl Runtime {
         let config = config.read().await;
 
         // Initialize channels
-        config
-            .sources
-            .keys()
-            .chain(config.transforms.keys())
-            .for_each(|name| {
-                let (sender, receiver) = broadcast::channel(config.channel_capacity);
-                self.tx.insert(name.to_string(), sender);
-                self.rx.insert(name.to_string(), receiver);
-            });
+        config.channel_names().iter().for_each(|name| {
+            let (sender, receiver) = broadcast::channel(config.channel_capacity);
+            self.tx.insert(name.to_string(), sender);
+            self.rx.insert(name.to_string(), receiver);
+        });
 
         // Create sources
         for (name, source_config) in &config.sources {
@@ -107,14 +103,14 @@ impl Runtime {
 
         // Create transforms
         for (name, transform_config) in &config.transforms {
-            let transform =
-                crate::transforms::create_transform(name.to_string(), transform_config.clone())
-                    .map_err(|e| {
-                        RuntimeError::init_error(format!(
-                            "Failed to create transform {}: {}",
-                            name, e
-                        ))
-                    })?;
+            let transform = crate::transforms::create_transform(
+                name.to_string(),
+                transform_config.clone(),
+                self.tx.clone(),
+            )
+            .map_err(|e| {
+                RuntimeError::init_error(format!("Failed to create transform {}: {}", name, e))
+            })?;
             self.components.insert(
                 name.to_string(),
                 ComponentRef::Transform(Arc::new(Mutex::new(transform))),
@@ -160,7 +156,6 @@ impl Runtime {
             }
         }
 
-        // 等待所有处理中的事件完成
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         Ok(())
@@ -185,13 +180,6 @@ impl Runtime {
                     };
 
                     for input in inputs {
-                        if !runtime.components.contains_key(&input) {
-                            return Err(RuntimeError::invalid_input(
-                                name.clone(),
-                                format!("Input {} not found", input),
-                            ));
-                        }
-
                         let tx = {
                             let sender = runtime.tx.get(&name).ok_or_else(|| {
                                 RuntimeError::channel_error(format!(
@@ -257,13 +245,6 @@ impl Runtime {
                     };
 
                     for input in inputs {
-                        if !runtime.components.contains_key(&input) {
-                            return Err(RuntimeError::invalid_input(
-                                name.clone(),
-                                format!("Input {} not found", input),
-                            ));
-                        }
-
                         let mut input_rx = {
                             let receiver = runtime.rx.get(&input).ok_or_else(|| {
                                 RuntimeError::channel_error(format!(

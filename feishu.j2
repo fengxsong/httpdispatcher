@@ -4,8 +4,26 @@
     "header": {
       "title": {
         "tag": "plain_text",
-        "content": "{{ alerts | length }} Alert: {% if groupLabels.alertname %}{{ groupLabels.alertname }}{% else %} Unknown {% endif %} {{ status }}"
+        "content": "{% if status == 'firing' %}💥 {% else %}😊 {% endif %}{{ alerts | length }} Alert{% if alerts|length > 1 %}s{% endif %}: {% if groupLabels.alertname %}{{ groupLabels.alertname }}{% else %} Unknown {% endif %} {{ status }}"
       },
+      {% if commonAnnotations.summary %}
+      "subtitle": {
+        "tag": "plain_text",
+        "content": "💡 {{ commonAnnotations.summary | escape }}"
+      },
+      {% endif %}
+      {% if commonLabels.cluster %}
+      "text_tag_list": [
+        {
+          "tag": "text_tag",
+          "text": {
+            "tag": "plain_text",
+            "content": "{{ commonLabels.cluster }}"
+          },
+          "color": "wathet"
+        }
+      ],
+      {% endif %}
       "template": "{% if status == 'firing' %}red{% else %}green{% endif %}"
     },
     "elements": [
@@ -14,7 +32,7 @@
         "tag": "div",
         "text": {
           "tag": "lark_md",
-          "content": "**Status**: {{ alert.status }}\n**Instance**: {{ alert.labels.instance }}\n**Job**: {{ alert.labels.job }}\n{% if alert.annotations.summary %}**Summary**: {{ alert.annotations.summary }}{%endif%}\n{% if alert.annotations.description %}**Description**: {{ alert.annotations.description }}{%endif%}"
+          "content": "{% for k,v in alert.annotations %}{% if k not in commonAnnotations or k == "description" %}**{{ k }}**: {{ v | escape }}\n{% endif %}{% endfor %}{% if at_openid %}<at id={{ at_openid }}></at>{% endif %}"
         }
       },
       {
@@ -22,11 +40,62 @@
       },
       {% endfor %}
       {
-        "tag": "note",
-        "elements": [
+        "tag": "column_set",
+        "columns": [
+          {% if commonAnnotations.runbook_url %}
           {
-            "tag": "lark_md",
-            "content": "[View in Prometheus]({{ alerts[0].generatorURL }})"
+            "tag": "column",
+            "width": "weighted",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "[runbook url]({{ commonAnnotations.runbook_url }})",
+                "text_align": "left",
+                "text_size": "notation",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info-hollow_filled",
+                  "color": "grey"
+                }
+              }
+            ]
+          },
+          {% endif %}
+          {% if alerts[0].generatorURL %}
+          {
+            "tag": "column",
+            "width": "weighted",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "[view more]({{ alerts[0].generatorURL }})",
+                "text_align": "left",
+                "text_size": "notation",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "history-search_filled",
+                  "color": "grey"
+                }
+              }
+            ]
+          },
+          {% endif %}
+          {
+            "tag": "column",
+            "width": "weighted",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "{{ now() | date(format='%Y-%m-%d %H:%M', timezone='Asia/Shanghai') }}",
+                "text_align": "left",
+                "text_size": "notation",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "time_filled",
+                  "color": "grey"
+                }
+              }
+            ]
           }
         ]
       }

@@ -86,8 +86,8 @@ impl Sink for ConsoleSink {
             OutputFormat::Json => to_string_pretty(&event.data)?,
         };
         debug!(
-            "processed event ID: {}, Data: {}, Metadata: {}",
-            event.id, output, event.metadata
+            "{} processed event ID: {}, Data: {}, Metadata: {}",
+            self.name, event.id, output, event.metadata
         );
         Ok(())
     }
