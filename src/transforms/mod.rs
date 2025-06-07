@@ -1,5 +1,6 @@
-mod route;
-mod vrl;
+pub mod route;
+pub mod vrl;
+pub mod vrl_utils;
 
 use crate::component::{Event, Transform};
 use crate::config::TransformConfig;

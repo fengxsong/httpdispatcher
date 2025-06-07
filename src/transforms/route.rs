@@ -1,20 +1,20 @@
 use crate::component::{Component, Event, Transform};
 use crate::config::RouteTransformConfig;
+use crate::transforms::vrl_utils::convert_to_vrl_value;
 use anyhow::{anyhow, Error, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::warn;
 use vrl::compiler::CompilationResult;
-use vrl::prelude::NotNan;
-use vrl::value::Value as VrlValue;
 use vrl::{
     compiler::{state::RuntimeState, Context, TargetValue, TimeZone},
     value,
     value::Secrets,
+    value::Value as VrlValue,
 };
 
 pub struct RouteTransform {
@@ -53,33 +53,6 @@ impl RouteTransform {
             output_channels,
         })
     }
-
-    fn convert_to_vrl_value(value: &serde_json::Value) -> VrlValue {
-        match value {
-            serde_json::Value::Null => VrlValue::Null,
-            serde_json::Value::Bool(b) => VrlValue::Boolean(*b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    VrlValue::Integer(i)
-                } else if let Some(f) = n.as_f64() {
-                    VrlValue::Float(NotNan::new(f).unwrap())
-                } else {
-                    VrlValue::Null
-                }
-            }
-            serde_json::Value::String(s) => VrlValue::Bytes(s.clone().into()),
-            serde_json::Value::Array(a) => {
-                VrlValue::Array(a.iter().map(Self::convert_to_vrl_value).collect())
-            }
-            serde_json::Value::Object(o) => {
-                let mut map = BTreeMap::new();
-                for (k, v) in o {
-                    map.insert(k.clone().into(), Self::convert_to_vrl_value(v));
-                }
-                VrlValue::Object(map)
-            }
-        }
-    }
 }
 
 unsafe impl Send for RouteTransform {}
@@ -104,7 +77,7 @@ impl Transform for RouteTransform {
     async fn transform(&self, event: &Event) -> Result<Event, Error> {
         let mut routed = false;
 
-        let event_value = RouteTransform::convert_to_vrl_value(&event.data);
+        let event_value = convert_to_vrl_value(&event.data);
         let event_metadata = value!(event.clone().metadata);
 
         let mut state = RuntimeState::default();
