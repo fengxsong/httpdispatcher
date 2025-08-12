@@ -318,19 +318,40 @@ impl Runtime {
                 let task = tokio::spawn(async move {
                     let mut guard = source.lock().await;
                     if let Err(e) = guard.run(tx).await {
-                        error!("Source {} failed: {}", name, e);
+                        return Err(e);
                     }
+                    Ok(())
                 });
 
                 tasks.push(task);
             }
         }
 
-        // Wait for all tasks to complete
-        for task in tasks {
-            task.await.map_err(|e| RuntimeError::Other(e.to_string()))?;
+        let task_handles = tasks.into_iter().collect::<Vec<_>>();
+        
+        use futures::future::select_all;
+        
+        let (result, index, remaining) = select_all(task_handles).await;
+        
+        for handle in remaining {
+            handle.abort();
+        }
+        
+        match result {
+            Ok(Ok(())) => {
+                info!("Source task {} completed successfully", index);
+            }
+            Ok(Err(e)) => {
+                error!("Source task {} failed: {}", index, e);
+                return Err(RuntimeError::Other(format!("Source task failed: {}", e)));
+            }
+            Err(e) => {
+                error!("Source task {} panicked: {}", index, e);
+                return Err(RuntimeError::Other(format!("Source task panicked: {}", e)));
+            }
         }
 
+        info!("All source tasks terminated, exiting program");
         Ok(())
     }
 
