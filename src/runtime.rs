@@ -333,17 +333,19 @@ impl Runtime {
         
         let (result, index, remaining) = select_all(task_handles).await;
         
-        for handle in remaining {
-            handle.abort();
-        }
-        
         match result {
             Ok(Err(e)) => {
                 error!("Source task {} failed: {}", index, e);
+                for handle in remaining {
+                    handle.abort();
+                }
                 return Err(RuntimeError::Other(format!("Source task failed: {}", e)));
             }
             Err(e) => {
                 error!("Source task {} panicked: {}", index, e);
+                for handle in remaining {
+                    handle.abort();
+                }
                 return Err(RuntimeError::Other(format!("Source task panicked: {}", e)));
             }
             _ => {}
