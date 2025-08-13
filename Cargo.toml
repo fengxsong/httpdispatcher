@@ -31,7 +31,7 @@ anyhow = "1.0.97"
 tera = "1.20.0"
 thiserror = "1.0"
 dashmap = "6.1.0"
-notify = "6.1"
+notify = "8.1"
 notify-debouncer-full = "0.3.1"
 futures = "0.3.31"
 

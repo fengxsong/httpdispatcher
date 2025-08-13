@@ -338,9 +338,6 @@ impl Runtime {
         }
         
         match result {
-            Ok(Ok(())) => {
-                info!("Source task {} completed successfully", index);
-            }
             Ok(Err(e)) => {
                 error!("Source task {} failed: {}", index, e);
                 return Err(RuntimeError::Other(format!("Source task failed: {}", e)));
@@ -349,9 +346,9 @@ impl Runtime {
                 error!("Source task {} panicked: {}", index, e);
                 return Err(RuntimeError::Other(format!("Source task panicked: {}", e)));
             }
+            _ => {}
         }
 
-        info!("All source tasks terminated, exiting program");
         Ok(())
     }
 

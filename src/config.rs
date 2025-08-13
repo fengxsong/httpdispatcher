@@ -1,13 +1,11 @@
 use crate::error::RuntimeError;
 use anyhow::{anyhow, Result};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, FileIdMap};
+use notify::{Event, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -360,7 +358,7 @@ pub struct ConfigManager {
     config: Arc<RwLock<Config>>,
     config_path: PathBuf,
     reload_tx: Option<broadcast::Sender<()>>,
-    watcher: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
+    watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl ConfigManager {
@@ -406,44 +404,26 @@ impl ConfigManager {
         let manager = self.clone();
 
         debug!("Watching config file: {}", &config_path.display());
-
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(100),
-            None,
-            move |res: std::result::Result<Vec<DebouncedEvent>, _>| match res {
-                Ok(events) => {
-                    for event in events {
-                        debug!("Received file system event: {:?}", event);
-                        if event.event.paths.iter().any(|p| p == &config_path) {
-                            info!("Detected change in config file: {}", &config_path.display());
-                            if let Err(e) = tx.blocking_send(()) {
-                                error!("Failed to send reload signal: {}", e);
-                            }
-                        }
+        
+        let config_path_for_watcher = config_path.clone();
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+            if let Ok(event) = event {
+                debug!("Received file system event: {:?}", event);
+                if event.paths.iter().any(|p| p == &config_path_for_watcher) {
+                    info!("Detected change in config file: {}", &config_path_for_watcher.display());
+                    if let Err(e) = tx.blocking_send(()) {
+                        error!("Failed to send reload signal: {}", e);
                     }
                 }
-                Err(e) => error!("Watch error: {:?}", e),
-            },
-        )
-        .map_err(|e| RuntimeError::Other(format!("Failed to create watcher: {}", e)))?;
-
-        debouncer
-            .watcher()
-            .configure(
-                notify::Config::default()
-                    .with_poll_interval(Duration::from_secs(1))
-                    .with_compare_contents(true),
-            )
-            .map_err(|e| RuntimeError::Other(format!("Failed to configure watcher: {}", e)))?;
-
-        debouncer
-            .watcher()
-            .watch(&self.config_path, RecursiveMode::NonRecursive)
-            .map_err(|e| RuntimeError::Other(format!("Failed to watch config file: {}", e)))?;
-
+            }
+        }).map_err(|e| anyhow!("Failed to create watcher: {}", e))?;
+        
+        watcher.watch(&config_path, RecursiveMode::NonRecursive)
+            .map_err(|e| anyhow!("Failed to watch config file: {}", e))?;
+        
         let mut this = self.clone();
         if let Some(this) = Arc::get_mut(&mut this) {
-            this.watcher = Some(debouncer);
+            this.watcher = Some(watcher);
         }
 
         tokio::spawn(async move {
